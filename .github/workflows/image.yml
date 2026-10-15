@@ -1,0 +1,121 @@
+name: Container image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  image:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check source and deployment syntax
+        run: |
+          bash -n entrypoint.sh common.sh healthcheck.sh
+          sh -n build.sh scripts/fetch-packages.sh
+          python3 -m py_compile tests/integration.py tests/udp_probe.py
+          docker compose config --quiet
+
+      - name: Image name
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.image.outputs.name }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,format=long
+          labels: |
+            org.opencontainers.image.title=WarpDeck
+            org.opencontainers.image.description=WARP IPv4 gateway and SOCKS5 with native IPv6 and explicit JSON reload
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build and run Dockerfile tests
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: warpdeck:ci
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test without registration or network
+        run: |
+          docker run --rm --network none --entrypoint warpdeck warpdeck:ci --help
+          docker run --rm --network none --entrypoint warpdeck warpdeck:ci config validate /etc/warpdeck/default.json
+          docker run --rm --network none --entrypoint warp-cli warpdeck:ci --version
+          docker run --rm --network none --entrypoint sh warpdeck:ci -ec '
+            test -z "$(ls -A /var/lib/cloudflare-warp)"
+            test -z "$(ls -A /var/lib/warpdeck)"
+          '
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish tested image
+        id: publish
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          provenance: mode=min
+
+      - name: Verify anonymous pull
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          # An empty client config proves no saved GHCR credentials are used.
+          export DOCKER_CONFIG="$(mktemp -d)"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          docker pull "$IMAGE@$DIGEST"
+          docker run --rm --network none --entrypoint warpdeck "$IMAGE@$DIGEST" config validate /etc/warpdeck/default.json
+          {
+            echo '### Published image'
+            echo "\`$IMAGE@$DIGEST\`"
+            echo 'Anonymous pull and default configuration validation passed.'
+          } >> "$GITHUB_STEP_SUMMARY"

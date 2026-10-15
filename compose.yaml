@@ -1,8 +1,6 @@
 services:
   warp:
-    build:
-      context: .
-    image: warpdeck:local
+    image: ${WARPDECK_IMAGE:-ghcr.io/poohyeban/warpdeck:latest}
     platform: linux/amd64
     restart: unless-stopped
     mem_limit: 256m

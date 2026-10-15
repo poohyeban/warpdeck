@@ -7,7 +7,8 @@
 ## 目录
 
 - [功能与边界](#功能与边界)
-- [从零构建和首次启动](#从零构建和首次启动)
+- [拉取镜像和首次启动](#拉取镜像和首次启动)
+- [镜像标签与自动发布](#镜像标签与自动发布)
 - [JSON 是唯一业务配置入口](#json-是唯一业务配置入口)
 - [命令](#命令)
 - [切换与失败处理](#切换与失败处理)
@@ -30,22 +31,29 @@
 | 持久化 | 注册身份和业务状态分别存入数据卷；重启恢复最后明确应用的配置 |
 | 宿主机接入 | 用户自行决定路由、防火墙及客户端接入；启动容器不会接管整机网络 |
 
-目前提供源码和 Dockerfile，需要自行构建；本文不依赖已发布的 GHCR 镜像。仅支持 **Linux amd64**，没有 ARM64 原生镜像。SOCKS 使用来源 IP 认证，不提供用户名/密码认证；如果多个客户端经过同一个 NAT，容器只能按它实际看到的来源地址区分。示例端口仅绑定宿主机回环地址。
+提供 GHCR 镜像 **`ghcr.io/poohyeban/warpdeck:latest`**，用户可以直接拉取，也可从源码构建。仅支持 **Linux amd64**，没有 ARM64 原生镜像。SOCKS 使用来源 IP 认证，不提供用户名/密码认证；如果多个客户端经过同一个 NAT，容器只能按它实际看到的来源地址区分。示例端口仅绑定宿主机回环地址。
 
-## 从零构建和首次启动
+## 拉取镜像和首次启动
 
 支持 Linux amd64、Docker Engine 和 Docker Compose v2；需要 `/dev/net/tun`、NET_ADMIN 权限，以及容器到 Cloudflare 注册服务和隧道端点的网络连通性。保留原生 IPv6 需要宿主机本身有可用的 IPv6 出口；IPv4-only 主机也可使用 SOCKS/IPv4 网关，但不会凭空获得原生 IPv6；这类主机应将 `socks.resolution` 设置为 `prefer_ipv4` 并 `reload`，避免优先选择不可达的 AAAA 地址。默认仍为 `prefer_ipv6`，适用于具备原生 IPv6 的部署。
 
-宿主机不需要安装 Go、WARP、3proxy 或 Debian 软件包工具。构建阶段需要访问 Docker Hub、Debian 软件源、Cloudflare 软件源与 GitHub；运行阶段需要访问 Cloudflare 注册服务和隧道端点。
+宿主机不需要安装 Go、WARP、3proxy 或 Debian 软件包工具。直接部署需要访问 GHCR 下载镜像；运行阶段需要访问 Cloudflare 注册服务和隧道端点。公开镜像无需 GitHub 账户或 `docker login`。
 
-获取源码并进入项目目录：
+获取部署文件并进入项目目录（克隆源码不代表需要编译）：
 
 ```sh
 git clone https://github.com/poohyeban/warpdeck.git
 cd warpdeck
 ```
 
-检查宿主机环境后构建、启动：
+如果不想克隆仓库，也可以只下载通用 Compose 文件：
+
+```sh
+mkdir warpdeck && cd warpdeck
+curl -fL https://raw.githubusercontent.com/poohyeban/warpdeck/main/compose.yaml -o compose.yaml
+```
+
+以上两种方式选一种即可。检查宿主机环境后拉取、启动：
 
 ```sh
 docker version
@@ -57,7 +65,7 @@ test -c /dev/net/tun
 
 
 ```sh
-docker compose build
+docker compose pull
 docker compose up -d
 # 首次空数据卷会等待注册；此时尚未健康是预期状态。
 # 确认接受 Cloudflare 条款后，手动注册：
@@ -90,6 +98,33 @@ docker compose exec warp warpdeck reload
 查看启动和应用结果可用 `docker compose logs --tail 80 warp`。官方守护进程的详细输出可能包含账户信息，因此默认不转发到 Docker 日志；连接诊断可用 `docker compose exec warp warp-cli --accept-tos status`。未注册时先完成上述命令；注册失败时检查网络连通性，再重试注册，勿删除正常的数据卷。注册完成后若隧道尚未连接，查看 `warpdeck status` 和官方客户端状态。需要保留数据时使用 `docker compose down`；加上 `-v` 会删除注册和业务配置。
 
 官方说明：[WARP Linux 注册与连接](https://developers.cloudflare.com/warp-client/get-started/linux/)、[软件包来源](https://pkg.cloudflareclient.com/)。
+
+## 镜像标签与自动发布
+
+镜像地址：[ghcr.io/poohyeban/warpdeck](https://github.com/poohyeban/warpdeck/pkgs/container/warpdeck)。构建记录：[GitHub Actions](https://github.com/poohyeban/warpdeck/actions/workflows/image.yml)。
+
+| 引用 | 用途 |
+| --- | --- |
+| `ghcr.io/poohyeban/warpdeck:latest` | `main` 分支最近一次成功发布，默认部署使用 |
+| `ghcr.io/poohyeban/warpdeck:main` | 与主分支发布对应 |
+| `ghcr.io/poohyeban/warpdeck:sha-<完整提交 SHA>` | 按源码提交查找镜像；同一提交重新构建时仍可能更新 |
+| `ghcr.io/poohyeban/warpdeck:1.2.3` | 推送 `v1.2.3` 这类版本标签时生成；这里只是格式示例，不代表该版本已发布 |
+| `ghcr.io/poohyeban/warpdeck@sha256:<摘要>` | 按 digest 固定镜像内容，适合需要可复现部署与精确回退的用户 |
+
+通过环境变量选择已有标签或 digest。建议把选择写入本机 `.env`（已被 Git 忽略），之后每次 Compose 操作都会使用同一镜像：
+
+```sh
+# 默认跟随主分支最近一次成功构建
+printf '%s\n' 'WARPDECK_IMAGE=ghcr.io/poohyeban/warpdeck:latest' > .env
+docker compose pull
+docker compose up -d
+```
+
+需要固定版本时，将 `.env` 中的值换成包页面实际存在的标签或 digest。`latest` 和 `main` 是移动标签；获取镜像的新版本需要手动 `pull` 并重建容器，运行中的容器不会自动更新。仅发布 `linux/amd64`；Apple Silicon 或 ARM VPS 不属于原生支持平台。
+
+工作流在推送 `main`、推送 `v*` 标签或手动运行时构建；PR 只构建和检查，不登录 GHCR、不发布。手动运行限定在 `main` 或 `v*` 标签。构建包含 Go 单元测试、动态库检查，以及镜像命令和默认 JSON 校验；检查通过后才发布。Actions 不进行 WARP 注册，不包含注册身份，也不连接任何现有服务器。端到端 WARP 网络测试仍需在独立测试环境执行。
+
+发布使用仓库自带的 `GITHUB_TOKEN`，不需要在仓库保存个人 PAT。第三方 Actions 固定到提交 SHA；镜像带源码链接和源码 revision 标签。首次创建 GHCR 包时，维护者需要在包设置中确认其可见性为 Public；公开仓库不会自动保证包也公开。参见 [GitHub 包可见性说明](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility)。Fork 项目会发布到 Fork 所有者的 GHCR 命名空间，需相应修改本机 `WARPDECK_IMAGE`；包首次公开设置也需自行完成。
 
 ## JSON 是唯一业务配置入口
 
@@ -248,9 +283,15 @@ IPv4 经 WARP；IPv6 排除于隧道之外，走原生网络。默认 `prefer_ip
 Dockerfile 使用公开的 `debian:bookworm-slim` 和官方 Go 构建镜像。独立构建阶段编译控制程序并运行单元测试；另一个阶段下载并校验固定版本的 Cloudflare WARP 与 3proxy 软件包，只提取命令行运行文件和版权资料。运行镜像不包含编译器、WARP GUI 或 WebKit，不执行下载包的维护脚本。
 
 ```sh
-# 与 docker compose build 等价，也可用于只构建镜像
+# 可选：自行构建，不使用 GHCR 成品镜像
 sh build.sh
+
+# 告诉通用 Compose 使用刚构建的本地镜像
+printf '%s\n' 'WARPDECK_IMAGE=warpdeck:local' > .env
+docker compose up -d --pull never
 ```
+
+自行构建需要访问 Docker Hub、Debian 软件源、Cloudflare 软件源与 GitHub。Compose 默认只拉取镜像，不含 `build` 指令；本地构建统一使用 `build.sh`。
 
 当前固定 WARP `2026.8.2110.0`、3proxy `1.0.1`，下载文件均校验 SHA-256。Debian 运行库使用官方仓库安全更新。升级固定软件包时须同步验证版本、校验值及运行兼容性；不要复制实际部署的数据卷到构建目录。
 
@@ -286,25 +327,27 @@ Compose 默认限制容器内存为 256 MiB、内存与 Swap 合计为 384 MiB�
 
 ```sh
 # 保留当前镜像，便于回退；每次更新使用不同的备份标签
-docker image tag warpdeck:local warpdeck:before-update
+docker image tag "$(docker inspect --format '{{.Image}}' "$(docker compose ps -q warp)")" warpdeck:before-update
 
-# 获取源码并重新构建；需要本地工作区无冲突
-git pull --ff-only
-docker compose build --pull
+# 拉取 .env / Compose 当前选择的镜像
+# 如果固定了旧版本或 digest，先将 .env 改为计划升级的引用
+docker compose pull
 
 # 重建会短暂中断本容器承载的连接
-docker compose up -d --no-build
+docker compose up -d
 docker compose ps
 docker compose exec warp warpdeck status
 ```
+
+只下载了 Compose 文件的用户也能执行上述升级，不需要 `git pull` 或源码构建。需要更新 Compose 本身时单独审查部署文件变化；不要覆盖自己已有的网络配置。自行构建的用户使用 `sh build.sh --pull` 重建，并保持 `.env` 指向本地镜像。
 
 升级保留原数据卷和 Compose 项目名。不要随意改变项目目录名或 `-p` 项目名：Compose 会按项目名寻找数据卷，名称变化可能表现为“身份丢失、重新要求注册”。需要固定名称时，在首次部署就选定 `docker compose -p <项目名> ...` 并持续使用。
 
 若需要回退镜像，且旧版本与现有数据格式兼容：
 
 ```sh
-docker image tag warpdeck:before-update warpdeck:local
-docker compose up -d --no-build --force-recreate
+printf '%s\n' 'WARPDECK_IMAGE=warpdeck:before-update' > .env
+docker compose up -d --pull never --force-recreate
 ```
 
 不要用 `docker compose down -v` 作为修复或升级步骤，它会删除数据卷。普通 `restart` 也不是应用待确认 JSON 的命令；确认修改仍应执行 `warpdeck reload`。修改 Compose 端口、资源或挂载配置则需要 `docker compose up -d` 重建，与容器内 JSON 的应用是两个独立操作。
@@ -313,6 +356,8 @@ docker compose up -d --no-build --force-recreate
 
 | 现象 | 检查与处理 |
 | --- | --- |
+| GHCR 拉取 denied / unauthorized | 核对镜像地址和标签；公开包可匿名拉取。Fork 维护者需在包设置中手动设为 Public |
+| 拉取提示 no matching manifest | 当前仅构建 Linux amd64，检查宿主机架构和 Compose platform |
 | 首次启动显示 unhealthy，注册状态为 `waiting` | 确认接受条款后执行 `warpdeck register --accept-tos`；等待隧道连接，再查看状态 |
 | 注册命令失败 | 检查容器到 Cloudflare 的网络；可重试同一命令，已有身份不会被主动删除 |
 | `config_in_sync=false` | 先 `config show`、`config validate`；内容符合预期后 `reload`，并检查 `config_error` |
@@ -341,8 +386,9 @@ docker compose logs --tail 80 warp
 
 ```text
 .
+├── .github/workflows/image.yml  # 构建、检查并发布到 GHCR
 ├── Dockerfile                  # 多阶段构建与运行依赖
-├── compose.yaml                # 通用部署示例；无宿主机接管脚本
+├── compose.yaml                # 默认拉取 GHCR；无宿主机接管脚本
 ├── config.example.json         # 完整默认业务配置，来源白名单为空
 ├── build.sh                    # 镜像构建入口
 ├── cmd/warpdeck/
@@ -367,7 +413,8 @@ docker compose logs --tail 80 warp
 构建会运行 Go 单元测试。额外的网络回归测试需要 Linux 上已有 Docker、Python 3、`nsenter` 和相应权限：
 
 ```sh
-sudo python3 tests/integration.py --image warpdeck:local --accept-tos
+docker pull ghcr.io/poohyeban/warpdeck:latest
+sudo python3 tests/integration.py --image ghcr.io/poohyeban/warpdeck:latest --accept-tos
 ```
 
 测试会创建临时容器、网络、数据卷和独立 WARP 身份，验证注册、来源限制、SOCKS/网关 TCP/UDP、三模式和重启持久化，然后清理自己的资源；不修改宿主机默认路由。测试默认使用 `172.28.81.0/24`，运行前确保无冲突。有原生 IPv6 的测试机可加 `--ipv6`，脚本会创建独立双栈网络（另用 `fd80:81::/64`）。已有双栈测试网络可通过 `--network`、`--server-ip`、`--client-ip`、`--server-ipv6`、`--client-ipv6` 与 `--ipv6` 指定，脚本不会删除传入的现有网络。不要复用生产容器 IP。
