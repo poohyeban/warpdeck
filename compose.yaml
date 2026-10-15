@@ -1,0 +1,50 @@
+services:
+  warp:
+    build:
+      context: .
+    image: warpdeck:local
+    platform: linux/amd64
+    restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 384m
+    pids_limit: 96
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, /usr/local/sbin/healthcheck.sh]
+      interval: 15s
+      timeout: 5s
+      retries: 2
+      start_period: 60s
+    cap_add: [NET_ADMIN]
+    devices: [/dev/net/tun:/dev/net/tun]
+    environment:
+      MALLOC_ARENA_MAX: "2"
+      MALLOC_TRIM_THRESHOLD_: "131072"
+    ports:
+      - "127.0.0.1:40000:1080/tcp"
+    volumes:
+      - warp-data:/var/lib/cloudflare-warp
+      - warpdeck-state:/var/lib/warpdeck
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+    networks:
+      gateway:
+        ipv4_address: 172.28.80.2
+        ipv6_address: fd80:28::2
+    logging:
+      driver: json-file
+      options:
+        max-size: "2m"
+        max-file: "2"
+networks:
+  gateway:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 172.28.80.0/24
+        - subnet: fd80:28::/64
+volumes:
+  warp-data:
+  warpdeck-state:

@@ -1,0 +1,12 @@
+*
+!Dockerfile
+!go.mod
+!cmd/
+!cmd/warpdeck/
+!cmd/warpdeck/*.go
+!scripts/
+!scripts/fetch-packages.sh
+!entrypoint.sh
+!healthcheck.sh
+!common.sh
+!config.example.json

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "mode": "both",
+  "ipv6": "native",
+  "socks": {
+    "listen": "0.0.0.0",
+    "port": 1080,
+    "allowed_sources": [],
+    "max_connections": 32,
+    "resolution": "prefer_ipv6",
+    "udp": true
+  },
+  "gateway": {
+    "interface": "eth0",
+    "allowed_sources": [],
+    "tcp_mss": 1240
+  }
+}

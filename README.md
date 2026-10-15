@@ -1,0 +1,373 @@
+# WarpDeck
+
+一个容器，提供 WARP IPv4 网关和 SOCKS5。**WarpDeck 是自定义封装，`warpdeck` 不是 Cloudflare 官方命令。**
+
+容器只处理送到它的流量，负责容器内的服务、配置与进程恢复。用户自行配置接入和宿主机路由、防火墙。项目不包含宿主机接入服务，不挂载 Docker socket，不使用宿主机网络命名空间。
+
+## 目录
+
+- [功能与边界](#功能与边界)
+- [从零构建和首次启动](#从零构建和首次启动)
+- [JSON 是唯一业务配置入口](#json-是唯一业务配置入口)
+- [命令](#命令)
+- [切换与失败处理](#切换与失败处理)
+- [接入与 IPv6](#接入与-ipv6)
+- [运行与构建](#运行与构建)
+- [日常维护与升级](#日常维护与升级)
+- [故障排查](#故障排查)
+- [项目结构](#项目结构)
+- [隔离验证](#隔离验证)
+
+## 功能与边界
+
+| 能力 | 行为 |
+| --- | --- |
+| 三种模式 | `proxy` 只提供 SOCKS5，`gateway` 只提供 IPv4 转发，`both` 同时提供两者 |
+| IPv4 出站 | 交给容器代理或网关的 IPv4 流量通过 WARP |
+| IPv6 出站 | 保留原生 IPv6，不将 IPv6 放入 WARP 隧道，也不强制域名使用 IPv4 |
+| 接入控制 | SOCKS 和网关分别配置来源白名单，默认拒绝全部来源 |
+| 配置管理 | JSON 决定业务行为；命令只保存修改，明确 `reload` 后才应用 |
+| 持久化 | 注册身份和业务状态分别存入数据卷；重启恢复最后明确应用的配置 |
+| 宿主机接入 | 用户自行决定路由、防火墙及客户端接入；启动容器不会接管整机网络 |
+
+目前提供源码和 Dockerfile，需要自行构建；本文不依赖已发布的 GHCR 镜像。仅支持 **Linux amd64**，没有 ARM64 原生镜像。SOCKS 使用来源 IP 认证，不提供用户名/密码认证；如果多个客户端经过同一个 NAT，容器只能按它实际看到的来源地址区分。示例端口仅绑定宿主机回环地址。
+
+## 从零构建和首次启动
+
+支持 Linux amd64、Docker Engine 和 Docker Compose v2；需要 `/dev/net/tun`、NET_ADMIN 权限，以及容器到 Cloudflare 注册服务和隧道端点的网络连通性。保留原生 IPv6 需要宿主机本身有可用的 IPv6 出口；IPv4-only 主机也可使用 SOCKS/IPv4 网关，但不会凭空获得原生 IPv6；这类主机应将 `socks.resolution` 设置为 `prefer_ipv4` 并 `reload`，避免优先选择不可达的 AAAA 地址。默认仍为 `prefer_ipv6`，适用于具备原生 IPv6 的部署。
+
+宿主机不需要安装 Go、WARP、3proxy 或 Debian 软件包工具。构建阶段需要访问 Docker Hub、Debian 软件源、Cloudflare 软件源与 GitHub；运行阶段需要访问 Cloudflare 注册服务和隧道端点。
+
+获取源码并进入项目目录：
+
+```sh
+git clone https://github.com/poohyeban/warpdeck.git
+cd warpdeck
+```
+
+检查宿主机环境后构建、启动：
+
+```sh
+docker version
+docker compose version
+test -c /dev/net/tun
+```
+
+如果 `/dev/net/tun` 不存在，需要由宿主机或 VPS 平台提供 TUN 支持；容器无法替代宿主机内核提供这个设备。
+
+
+```sh
+docker compose build
+docker compose up -d
+# 首次空数据卷会等待注册；此时尚未健康是预期状态。
+# 确认接受 Cloudflare 条款后，手动注册：
+docker compose exec warp warpdeck register --accept-tos
+docker compose exec warp warpdeck status
+```
+
+注册使用官方 `warp-cli registration new`，身份保存在独立的 `warp-data` 数据卷。已有身份会复用；重复执行注册命令不会更换身份，注册失败也不会删除已有数据。构建镜像时不注册，不包含任何机器的身份。
+
+默认来源白名单为空。按通用 Compose 示例，允许宿主机桥接地址使用服务：
+
+```sh
+docker compose exec warp warpdeck config set socks.allowed_sources '["172.28.80.1/32"]'
+docker compose exec warp warpdeck config set gateway.allowed_sources '["172.28.80.1/32"]'
+docker compose exec warp warpdeck config show
+docker compose exec warp warpdeck reload
+docker compose ps
+curl --fail --max-time 20 --socks5-hostname 127.0.0.1:40000 https://1.1.1.1/cdn-cgi/trace
+```
+
+上面的探测指定 IPv4 目标，连通时应看到 `warp=on`。对同时提供 A/AAAA 的域名，默认优先原生 IPv6，因此可能看到 `warp=off`，这与 IPv4 经 WARP 并不矛盾。IPv4-only 主机在代理域名请求前执行：
+
+```sh
+docker compose exec warp warpdeck config set socks.resolution '"prefer_ipv4"'
+docker compose exec warp warpdeck reload
+```
+
+配置网关白名单只开放容器的转发能力；流量如何送入容器仍由使用者配置。本项目不修改宿主机默认路由。Compose 的网段与本地网络冲突时，应先修改示例网段和相应白名单。示例绑定本机回环端口，未开放公网 SOCKS。
+
+查看启动和应用结果可用 `docker compose logs --tail 80 warp`。官方守护进程的详细输出可能包含账户信息，因此默认不转发到 Docker 日志；连接诊断可用 `docker compose exec warp warp-cli --accept-tos status`。未注册时先完成上述命令；注册失败时检查网络连通性，再重试注册，勿删除正常的数据卷。注册完成后若隧道尚未连接，查看 `warpdeck status` 和官方客户端状态。需要保留数据时使用 `docker compose down`；加上 `-v` 会删除注册和业务配置。
+
+官方说明：[WARP Linux 注册与连接](https://developers.cloudflare.com/warp-client/get-started/linux/)、[软件包来源](https://pkg.cloudflareclient.com/)。
+
+## JSON 是唯一业务配置入口
+
+配置位于 **`/var/lib/warpdeck/config.json`**，保存在 `warpdeck-state` 数据卷中。首次启动复制 [config.example.json](config.example.json)，两个来源白名单默认为空，拒绝全部来源。示例不含任何实际服务器的地址。
+
+完整默认配置如下：
+
+```json
+{
+  "version": 1,
+  "mode": "both",
+  "ipv6": "native",
+  "socks": {
+    "listen": "0.0.0.0",
+    "port": 1080,
+    "allowed_sources": [],
+    "max_connections": 32,
+    "resolution": "prefer_ipv6",
+    "udp": true
+  },
+  "gateway": {
+    "interface": "eth0",
+    "allowed_sources": [],
+    "tcp_mss": 1240
+  }
+}
+```
+
+命令、直接编辑文件都操作同一份 JSON；没有 `MODE` 环境变量或独立模式文件覆盖它。编辑文件和保存命令不会自动应用。普通重启及保留数据卷的容器重建使用上次明确应用的配置，待确认修改不会因重启而生效。WARP 注册使用独立的 `/var/lib/cloudflare-warp` 数据卷。
+
+| 字段 | 含义 |
+| --- | --- |
+| `version` | 配置版本，目前为 `1` |
+| `mode` | `proxy`、`gateway` 或 `both` |
+| `ipv6` | 当前只支持 `native`，保留原生 IPv6 |
+| `socks.listen` | SOCKS 监听 IP，可设本地 IPv4/IPv6 地址或通配地址 |
+| `socks.port` | SOCKS TCP 端口，1024–65535 |
+| `socks.allowed_sources` | 允许连接 SOCKS 的来源 IP/CIDR，支持 IPv4/IPv6；`[]` 拒绝全部 |
+| `socks.max_connections` | 最大并发连接数，1–4096 |
+| `socks.resolution` | `prefer_ipv6` 或 `prefer_ipv4`，只决定域名解析优先顺序 |
+| `socks.udp` | 是否启用 SOCKS5 UDP ASSOCIATE |
+| `gateway.interface` | 容器内接收入站转发流量的接口，例如 `eth0` |
+| `gateway.allowed_sources` | 允许通过 IPv4 网关转发的来源 IPv4/CIDR；`[]` 拒绝全部 |
+| `gateway.tcp_mss` | TCP MSS 上限，536–65495；`0` 关闭调整 |
+
+所有字段必填。未知字段、重复 JSON 键、错误类型、无效地址和越界参数均会被拒绝。CIDR 会规范化并去重。白名单匹配**容器实际看到的来源地址**，经过 NAT 后可能是宿主机或桥接网关地址。
+
+Docker 端口映射、容器地址、数据卷、权限、资源上限属于外部部署配置，仍由 Compose 管理；这份 JSON 不会修改宿主机。WARP 的注册身份仍由官方客户端数据卷管理。
+
+## 命令
+
+以下统一使用 Compose 服务名 `warp`，在项目目录执行；也可用 `docker exec <实际容器名> warpdeck ...`。
+
+```sh
+docker compose exec warp warpdeck status
+docker compose exec warp warpdeck status --json
+docker compose exec warp warpdeck config show
+docker compose exec warp warpdeck config validate
+
+# 这些命令只保存，不立即切换。
+docker compose exec warp warpdeck mode proxy
+docker compose exec warp warpdeck mode gateway
+docker compose exec warp warpdeck mode both
+
+# 以下地址来自通用 Compose 示例，请按实际来源修改。
+docker compose exec warp warpdeck config set socks.allowed_sources '["172.28.80.1/32"]'
+docker compose exec warp warpdeck config set gateway.allowed_sources '["172.28.80.1/32"]'
+docker compose exec warp warpdeck config set socks.max_connections 32
+docker compose exec warp warpdeck config set socks.udp false
+
+# 查看、校验，然后明确应用。
+docker compose exec warp warpdeck config show
+docker compose exec warp warpdeck config validate
+docker compose exec warp warpdeck reload
+```
+
+| 操作 | 保存请求配置 | 应用到运行服务 |
+| --- | --- | --- |
+| `mode` / `config set` | 是 | 否 |
+| 直接编辑 `config.json` | 是 | 否 |
+| `config validate` | 否 | 否 |
+| `reload` | 使用当前请求配置 | 是 |
+| `config apply FILE` | 校验后导入文件 | 是 |
+| 容器重启或重建（保留卷） | 不改变待确认内容 | 恢复上次已应用快照 |
+
+`mode both` 等价于把 JSON 的 `mode` 改为 `both`。`config set FIELD JSON_VALUE` 的值必须是 JSON，例如字符串需写成 `'"prefer_ipv6"'`。`mode` 和 `config set` 通过文件锁串行保存，校验后原子替换文件，明确提示尚未应用；执行 `reload` 才生效。失败返回非零状态。
+
+要同时修改多个字段，可准备完整 JSON。`config apply FILE` 是另一条明确应用命令，会校验、导入并应用该文件：
+
+```sh
+docker compose cp ./config.json warp:/tmp/new-config.json
+docker compose exec warp warpdeck config validate /tmp/new-config.json
+docker compose exec warp warpdeck config apply /tmp/new-config.json
+```
+
+也可以直接编辑数据卷中的 `config.json`。**没有文件监听、定时配置检测或自动应用。** 建议先写临时文件，再在同一目录原子重命名。确认内容后执行以下命令，它会固定本次确认的内容、校验并等待应用结果：
+
+```sh
+docker compose exec warp warpdeck reload
+```
+
+如果使用宿主机绑定目录替代命名卷，应挂载**整个可写目录**到 `/var/lib/warpdeck`，不要只挂载单个 `config.json`；原子替换需要目录可写。
+
+## 切换与失败处理
+
+| 模式 | SOCKS5 | 容器 IPv4 网关 |
+| --- | --- | --- |
+| `proxy` | 开启 | 关闭 |
+| `gateway` | 关闭 | 开启 |
+| `both` | 开启 | 开启 |
+
+执行 `reload` 后，模式切换、网关白名单和 MSS 修改无需重启容器或 WARP 隧道。SOCKS 配置修改只重启 SOCKS 子进程；关闭或重启 SOCKS 会中断现有代理连接。关闭网关会停止转发。`reload` / `config apply` 等待配置应用，不保证外部网络此时已连通。
+
+- 保存命令校验 JSON 格式和参数；应用命令另外检查接口、监听地址与端口冲突，失败不切换服务。
+- 手动编辑或保存命令不触发运行配置变化；`status` 显示请求内容与已应用状态是否一致。错误 JSON 不影响当前服务。
+- 应用阶段失败时，尝试恢复上次运行配置；JSON 保留请求内容，状态明确显示未同步。修正 JSON 后重新应用。
+- `/var/lib/warpdeck/applied.json` 是内部生成的已应用快照，不能作为用户配置编辑。重启、崩溃恢复和重建使用它，即使 `config.json` 有未确认或无效修改也不会自动启用。
+- 首次启动没有快照时从 `config.json` 初始化（默认空白名单）；首次配置无效或已有恢复快照损坏时启动失败。成功应用后更新快照。删除整个状态卷会同时清除配置与快照。
+
+`status --json` 提供 `registration`、`requested_mode`、实际 `mode`、`config_in_sync`、`config_error`、SOCKS、网关和隧道状态。`ipv4_gateway=enabled` 仅表示容器具备转发能力，不表示宿主机已经接入。内部已应用快照和状态文件只用于报告/恢复，不是额外用户配置入口。
+
+下面是已注册、隧道连接且 `both` 已应用时的状态示意，不包含任何账户身份或出口 IP：
+
+```json
+{
+  "name": "WarpDeck",
+  "registration": "registered",
+  "requested_mode": "both",
+  "mode": "both",
+  "config_path": "/var/lib/warpdeck/config.json",
+  "config_in_sync": true,
+  "config_error": "",
+  "socks": "running",
+  "ipv4_gateway": "enabled",
+  "tunnel": "connected",
+  "ipv6": "native"
+}
+```
+
+`config_in_sync=false` 表示有待应用的修改或配置错误；先检查 `config_error` 和配置内容，再决定是否执行 `reload`。状态中的 `ipv6=native` 描述路由策略，不证明宿主机 IPv6 当前可达；应使用真实 IPv6 目标验证连通性。
+
+## 接入与 IPv6
+
+通用 Compose 示例使用 `172.28.80.2`，SOCKS 端口 `1080` 映射到宿主机 `127.0.0.1:40000`。启动后需按实际来源配置白名单并执行 `reload`。修改 JSON 的监听端口不会自动修改 Docker 端口映射。
+
+SOCKS5 支持 TCP CONNECT 和 UDP ASSOCIATE。UDP 返回容器地址和动态 UDP 端口，客户端必须能路由到它；仅转发 SOCKS 的 TCP 端口不足以提供 UDP 接入。
+
+IPv4 经 WARP；IPv6 排除于隧道之外，走原生网络。默认 `prefer_ipv6` 使用 3proxy `-64`，有 AAAA 时优先 IPv6，没有 AAAA 时使用 IPv4；明确指定的 IP 保留地址族。没有强制 IPv4，也没有 IPv6 连接失败后自动回退 IPv4 的 Happy Eyeballs 实现。外部网络需提供可用的原生 IPv6。
+
+## 运行与构建
+
+仅一个官方 `warp-svc`，三种模式均使用 `tunnel_only`；需要 SOCKS 时运行一个低权限 3proxy 进程。Bash 监督进程接收明确的应用请求并监督进程、维护隧道路由，不扫描 JSON 文件。Go 编写的 `warpdeck` 仅在命令、配置检查和健康检查时短暂执行，不是常驻服务；编译器不进入镜像。
+
+关键进程退出会导致容器退出，由 `restart: unless-stopped` 恢复；健康检查本身不自动重启 unhealthy 容器。日志与资源限制由 Compose 设置。
+
+Dockerfile 使用公开的 `debian:bookworm-slim` 和官方 Go 构建镜像。独立构建阶段编译控制程序并运行单元测试；另一个阶段下载并校验固定版本的 Cloudflare WARP 与 3proxy 软件包，只提取命令行运行文件和版权资料。运行镜像不包含编译器、WARP GUI 或 WebKit，不执行下载包的维护脚本。
+
+```sh
+# 与 docker compose build 等价，也可用于只构建镜像
+sh build.sh
+```
+
+当前固定 WARP `2026.8.2110.0`、3proxy `1.0.1`，下载文件均校验 SHA-256。Debian 运行库使用官方仓库安全更新。升级固定软件包时须同步验证版本、校验值及运行兼容性；不要复制实际部署的数据卷到构建目录。
+
+`.dockerignore` 采用允许列表，只发送构建所需源码；`.gitignore` 排除本地配置、数据卷目录、私钥、日志和备份。只以本项目目录作为仓库根目录，示例配置 `config.example.json` 可提交。不要使用 `git add -f` 绕过敏感文件排除。
+
+依赖来源：[Cloudflare 官方软件包](https://pkg.cloudflareclient.com/)、[3proxy 1.0.1](https://github.com/3proxy/3proxy/releases/tag/1.0.1)、[Debian](https://www.debian.org/)、[Go 官方镜像](https://hub.docker.com/_/golang)。
+
+## 日常维护与升级
+
+常用命令均在包含 `compose.yaml` 的项目目录执行：
+
+```sh
+# 查看容器、资源使用和业务状态
+docker compose ps
+docker compose stats --no-stream
+docker compose exec warp warpdeck status --json
+
+# 查看有限的监督进程日志
+docker compose logs --tail 80 warp
+
+# 停止 / 再次启动（保留身份与配置）
+docker compose stop
+docker compose start
+
+# 删除容器和项目网络，保留命名数据卷
+docker compose down
+docker compose up -d
+```
+
+Compose 默认限制容器内存为 256 MiB、内存与 Swap 合计为 384 MiB、进程数为 96。`memswap_limit` 不会替宿主机创建 Swap；实际是否可用取决于宿主机。最大 SOCKS 并发默认为 32，资源消耗还取决于官方客户端版本、流量和连接数，不保证固定内存占用。日志每份 2 MiB、最多 2 份。
+
+更新前保留当前镜像，并备份两个数据卷到仓库外的私有位置。`warp-data` 含 WARP 身份；`warpdeck-state` 含请求配置和已应用快照，应同时保留。分享诊断材料前检查账户信息，不要提交卷内容或实际部署的 Compose 覆盖文件。
+
+```sh
+# 保留当前镜像，便于回退；每次更新使用不同的备份标签
+docker image tag warpdeck:local warpdeck:before-update
+
+# 获取源码并重新构建；需要本地工作区无冲突
+git pull --ff-only
+docker compose build --pull
+
+# 重建会短暂中断本容器承载的连接
+docker compose up -d --no-build
+docker compose ps
+docker compose exec warp warpdeck status
+```
+
+升级保留原数据卷和 Compose 项目名。不要随意改变项目目录名或 `-p` 项目名：Compose 会按项目名寻找数据卷，名称变化可能表现为“身份丢失、重新要求注册”。需要固定名称时，在首次部署就选定 `docker compose -p <项目名> ...` 并持续使用。
+
+若需要回退镜像，且旧版本与现有数据格式兼容：
+
+```sh
+docker image tag warpdeck:before-update warpdeck:local
+docker compose up -d --no-build --force-recreate
+```
+
+不要用 `docker compose down -v` 作为修复或升级步骤，它会删除数据卷。普通 `restart` 也不是应用待确认 JSON 的命令；确认修改仍应执行 `warpdeck reload`。修改 Compose 端口、资源或挂载配置则需要 `docker compose up -d` 重建，与容器内 JSON 的应用是两个独立操作。
+
+## 故障排查
+
+| 现象 | 检查与处理 |
+| --- | --- |
+| 首次启动显示 unhealthy，注册状态为 `waiting` | 确认接受条款后执行 `warpdeck register --accept-tos`；等待隧道连接，再查看状态 |
+| 注册命令失败 | 检查容器到 Cloudflare 的网络；可重试同一命令，已有身份不会被主动删除 |
+| `config_in_sync=false` | 先 `config show`、`config validate`；内容符合预期后 `reload`，并检查 `config_error` |
+| SOCKS 连接被拒绝 | 确认模式包含代理，核对监听地址/端口、Docker 映射和实际来源白名单；默认白名单为空 |
+| SOCKS TCP 正常但 UDP 失败 | 检查 `socks.udp=true`，以及客户端到返回的容器地址和动态 UDP 端口是否可路由；单个 TCP 映射不能解决 UDP 接入 |
+| 网关状态 enabled，但整机出口不变 | 容器只开放转发，不自动安装宿主机路由；检查用户自己配置的接入路径和来源白名单 |
+| 域名请求失败，IPv4 目标正常 | 默认优先 IPv6；检查原生 IPv6 连通性，IPv4-only 主机可将解析优先级改为 `prefer_ipv4` 后 reload |
+| 改了 JSON 端口后宿主机端口不通 | JSON 监听端口和 Compose 的目标端口必须一致；调整 Compose 后重建容器 |
+| `reload` 报监听地址/端口冲突 | 检查地址是否属于容器、端口是否已被占用；修改后再次确认应用 |
+| 容器启动失败，提示 TUN/权限问题 | 检查宿主机 TUN 支持、设备映射及 NET_ADMIN；使用项目提供的 Compose 权限配置 |
+| 网络地址冲突 | 部署前修改 Compose 的通用桥接网段、容器地址以及对应的来源白名单 |
+| 重启后仍为旧模式 | 有未确认修改时属于预期行为；重启恢复上次已应用快照，明确 reload 才切换 |
+| Docker 状态持续 unhealthy | 使用下面的诊断命令检查连接与健康检查；Docker 健康状态本身不会触发重启 |
+
+```sh
+docker compose exec warp warpdeck status --json
+docker compose exec warp warpdeck config validate
+docker compose exec warp warp-cli --accept-tos status
+docker compose exec warp /usr/local/sbin/healthcheck.sh
+docker compose logs --tail 80 warp
+```
+
+`warp-cli` 用于查看官方客户端状态；业务模式、白名单和解析策略统一用 `warpdeck` 管理，避免手工修改官方客户端模式导致运行状态与监督进程预期不一致。健康检查验证本地服务和隧道，不保证任意外部网站可达。
+
+## 项目结构
+
+```text
+.
+├── Dockerfile                  # 多阶段构建与运行依赖
+├── compose.yaml                # 通用部署示例；无宿主机接管脚本
+├── config.example.json         # 完整默认业务配置，来源白名单为空
+├── build.sh                    # 镜像构建入口
+├── cmd/warpdeck/
+│   ├── main.go                 # 配置校验、命令、配置渲染与状态
+│   └── main_test.go            # 配置解析与渲染测试
+├── entrypoint.sh               # 注册等待、隧道和服务监督、明确应用
+├── healthcheck.sh              # 容器健康检查
+├── common.sh                   # 监督脚本共用函数
+├── scripts/fetch-packages.sh   # 固定版本下载和 SHA-256 校验
+├── tests/
+│   ├── integration.py          # 隔离网络端到端验证
+│   └── udp_probe.py            # UDP DNS 与 SOCKS5 UDP 探测
+├── go.mod
+├── .dockerignore               # 构建上下文允许列表
+└── .gitignore                  # 排除运行身份、个人配置与构建产物
+```
+
+仓库仅包含容器源码、通用示例和测试，不需要任何既有 VPS 的镜像、配置、密钥或注册数据。
+
+## 隔离验证
+
+构建会运行 Go 单元测试。额外的网络回归测试需要 Linux 上已有 Docker、Python 3、`nsenter` 和相应权限：
+
+```sh
+sudo python3 tests/integration.py --image warpdeck:local --accept-tos
+```
+
+测试会创建临时容器、网络、数据卷和独立 WARP 身份，验证注册、来源限制、SOCKS/网关 TCP/UDP、三模式和重启持久化，然后清理自己的资源；不修改宿主机默认路由。测试默认使用 `172.28.81.0/24`，运行前确保无冲突。有原生 IPv6 的测试机可加 `--ipv6`，脚本会创建独立双栈网络（另用 `fd80:81::/64`）。已有双栈测试网络可通过 `--network`、`--server-ip`、`--client-ip`、`--server-ipv6`、`--client-ipv6` 与 `--ipv6` 指定，脚本不会删除传入的现有网络。不要复用生产容器 IP。
