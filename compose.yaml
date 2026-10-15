@@ -19,12 +19,16 @@ services:
       MALLOC_ARENA_MAX: "2"
       MALLOC_TRIM_THRESHOLD_: "131072"
     ports:
-      - "127.0.0.1:40000:1080/tcp"
+      - "40000:1080/tcp"
     volumes:
       - warp-data:/var/lib/cloudflare-warp
       - warpdeck-state:/var/lib/warpdeck
     sysctls:
       net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.all.forwarding: "1"
+      net.ipv6.bindv6only: "0"
+      net.ipv4.ip_unprivileged_port_start: "0"
       net.ipv4.conf.all.rp_filter: "0"
       net.ipv4.conf.default.rp_filter: "0"
     networks:

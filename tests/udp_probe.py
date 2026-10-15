@@ -11,7 +11,7 @@ def exact(s, n):
         data += part
     return data
 
-def probe(proxy, family):
+def probe(proxy, family, timeout=15):
     dest = '1.1.1.1' if family == 4 else '2606:4700:4700::1111'
     ident = os.urandom(2)
     query = ident + struct.pack('!HHHHH', 0x100, 1, 0, 0, 0) + b'\x07example\x03com\x00' + struct.pack('!HH', 1, 1)
@@ -19,8 +19,8 @@ def probe(proxy, family):
     try:
         if proxy != '-':
             host, port = proxy.rsplit(':', 1)
-            control = socket.create_connection((host, int(port)), 10)
-            control.settimeout(10)
+            control = socket.create_connection((host, int(port)), timeout)
+            control.settimeout(timeout)
             control.sendall(b'\x05\x01\x00')
             assert exact(control, 2) == b'\x05\x00'
             control.sendall(b'\x05\x03\x00\x01' + b'\0' * 6)
@@ -41,9 +41,17 @@ def probe(proxy, family):
             packet, target = query, (dest, 53)
             af = socket.AF_INET if family == 4 else socket.AF_INET6
         with socket.socket(af, socket.SOCK_DGRAM) as s:
-            s.settimeout(15)
-            s.sendto(packet, target)
-            reply = s.recv(4096)
+            # UDP does not guarantee delivery; retry a DNS query rather than
+            # treating one lost packet as a broken forwarding implementation.
+            s.settimeout(min(timeout, 3))
+            for attempt in range(3):
+                s.sendto(packet, target)
+                try:
+                    reply = s.recv(4096)
+                    break
+                except socket.timeout:
+                    if attempt == 2:
+                        raise
         if proxy != '-':
             assert reply[:3] == b'\0\0\0'
             at = reply[3]
@@ -55,4 +63,4 @@ def probe(proxy, family):
             control.close()
 
 if __name__ == '__main__':
-    probe(sys.argv[1], int(sys.argv[2]))
+    probe(sys.argv[1], int(sys.argv[2]), float(sys.argv[3]) if len(sys.argv)>3 else 15)

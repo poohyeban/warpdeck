@@ -1,18 +1,31 @@
 {
-  "version": 1,
-  "mode": "both",
-  "ipv6": "native",
+  "version": 2,
+  "mode": "proxy",
   "socks": {
-    "listen": "0.0.0.0",
+    "listen": "::",
     "port": 1080,
-    "allowed_sources": [],
+    "allowed_sources": [
+      "0.0.0.0/0",
+      "::/0"
+    ],
     "max_connections": 32,
     "resolution": "prefer_ipv6",
     "udp": true
   },
   "gateway": {
     "interface": "eth0",
-    "allowed_sources": [],
-    "tcp_mss": 1240
+    "allowed_sources": [
+      "0.0.0.0/0",
+      "::/0"
+    ],
+    "tcp_mss": 1220,
+    "masquerade": {
+      "ipv4": true,
+      "ipv6": true
+    }
+  },
+  "egress": {
+    "ipv4": "warp",
+    "ipv6": "warp"
   }
 }

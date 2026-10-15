@@ -34,15 +34,24 @@ type Socks struct {
 	Resolution string   `json:"resolution"`
 	UDP        bool     `json:"udp"`
 }
+type Egress struct {
+	IPv4 string `json:"ipv4"`
+	IPv6 string `json:"ipv6"`
+}
+type Masquerade struct {
+	IPv4 bool `json:"ipv4"`
+	IPv6 bool `json:"ipv6"`
+}
 type Gateway struct {
-	Interface string   `json:"interface"`
-	Allowed   []string `json:"allowed_sources"`
-	MSS       int      `json:"tcp_mss"`
+	Interface string     `json:"interface"`
+	Allowed   []string   `json:"allowed_sources"`
+	MSS       int        `json:"tcp_mss"`
+	NAT       Masquerade `json:"masquerade"`
 }
 type Config struct {
 	Version int     `json:"version"`
 	Mode    string  `json:"mode"`
-	IPv6    string  `json:"ipv6"`
+	Egress  Egress  `json:"egress"`
 	Socks   Socks   `json:"socks"`
 	Gateway Gateway `json:"gateway"`
 }
@@ -96,12 +105,9 @@ func exactKeys(m map[string]json.RawMessage, keys ...string) error {
 	}
 	return nil
 }
-func sources(in []string, ipv4Only bool) ([]string, error) {
+func sources(in []string) ([]string, error) {
 	if in == nil {
 		return nil, errors.New("allowed_sources must be an array; [] denies all")
-	}
-	if len(in) > 256 {
-		return nil, errors.New("too many allowed_sources")
 	}
 	out := make([]string, 0, len(in))
 	seen := map[string]bool{}
@@ -114,8 +120,11 @@ func sources(in []string, ipv4Only bool) ([]string, error) {
 			}
 			p = netip.PrefixFrom(a, a.BitLen())
 		}
-		if p.Addr().Is4In6() || p.Addr().Zone() != "" || (ipv4Only && !p.Addr().Is4()) {
+		if p.Addr().Zone() != "" {
 			return nil, fmt.Errorf("unsupported source address %q", s)
+		}
+		if p.Addr().Is4In6() && p.Bits() >= 96 {
+			p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
 		}
 		s = p.Masked().String()
 		if !seen[s] {
@@ -142,8 +151,32 @@ func decode(b []byte) (Config, error) {
 	if e := json.Unmarshal(b, &top); e != nil {
 		return c, e
 	}
-	if e := exactKeys(top, "version", "mode", "ipv6", "socks", "gateway"); e != nil {
+	// v1 is interpreted without changing its file or broadening its allowlists.
+	var version int
+	if e := json.Unmarshal(top["version"], &version); e != nil {
 		return c, e
+	}
+	if version == 1 {
+		if e := exactKeys(top, "version", "mode", "ipv6", "socks", "gateway"); e != nil {
+			return c, e
+		}
+		var oldIPv6 string
+		if e := json.Unmarshal(top["ipv6"], &oldIPv6); e != nil || oldIPv6 != "native" {
+			return c, errors.New("v1 requires ipv6=native")
+		}
+	} else if version == 2 {
+		if e := exactKeys(top, "version", "mode", "egress", "socks", "gateway"); e != nil {
+			return c, e
+		}
+		var egress map[string]json.RawMessage
+		if e := json.Unmarshal(top["egress"], &egress); e != nil {
+			return c, e
+		}
+		if e := exactKeys(egress, "ipv4", "ipv6"); e != nil {
+			return c, e
+		}
+	} else {
+		return c, errors.New("version must be 1 or 2")
 	}
 	if e := json.Unmarshal(top["socks"], &sock); e != nil {
 		return c, e
@@ -154,33 +187,62 @@ func decode(b []byte) (Config, error) {
 	if e := json.Unmarshal(top["gateway"], &gw); e != nil {
 		return c, e
 	}
-	if e := exactKeys(gw, "interface", "allowed_sources", "tcp_mss"); e != nil {
-		return c, e
+	if version == 1 {
+		if e := exactKeys(gw, "interface", "allowed_sources", "tcp_mss"); e != nil {
+			return c, e
+		}
+		// v1 only forwarded IPv4: keep its original IPv4-only allowlist semantics.
+		var oldAllowed []string
+		if e := json.Unmarshal(gw["allowed_sources"], &oldAllowed); e != nil {
+			return c, e
+		}
+		for _, value := range oldAllowed {
+			addr := strings.Split(value, "/")[0]
+			a, e := netip.ParseAddr(addr)
+			if e != nil || !a.Is4() {
+				return c, errors.New("v1 gateway sources must be IPv4; use v2 for IPv6")
+			}
+		}
+		gw["masquerade"] = json.RawMessage(`{"ipv4":true,"ipv6":false}`)
+		top["gateway"] = canonical(gw)
+		top["version"] = json.RawMessage(`2`)
+		top["egress"] = json.RawMessage(`{"ipv4":"warp","ipv6":"native"}`)
+		delete(top, "ipv6")
+	} else {
+		if e := exactKeys(gw, "interface", "allowed_sources", "tcp_mss", "masquerade"); e != nil {
+			return c, e
+		}
+		var nat map[string]json.RawMessage
+		if e := json.Unmarshal(gw["masquerade"], &nat); e != nil {
+			return c, e
+		}
+		if e := exactKeys(nat, "ipv4", "ipv6"); e != nil {
+			return c, e
+		}
 	}
-	d = json.NewDecoder(bytes.NewReader(b))
+	d = json.NewDecoder(bytes.NewReader(canonical(top)))
 	d.DisallowUnknownFields()
 	if e := d.Decode(&c); e != nil {
 		return c, e
 	}
-	if c.Version != 1 {
-		return c, errors.New("version must be 1")
-	}
 	if c.Mode != "proxy" && c.Mode != "gateway" && c.Mode != "both" {
 		return c, errors.New("mode must be proxy, gateway or both")
 	}
-	if c.IPv6 != "native" {
-		return c, errors.New("this build supports ipv6=native only")
+	for _, policy := range []string{c.Egress.IPv4, c.Egress.IPv6} {
+		if policy != "native" && policy != "warp" {
+			return c, errors.New("egress must be native or warp for each address family")
+		}
 	}
 	a, e := netip.ParseAddr(c.Socks.Listen)
 	if e != nil || a.Is4In6() || a.Zone() != "" {
 		return c, errors.New("socks.listen must be an IPv4/IPv6 address")
 	}
 	c.Socks.Listen = a.String()
-	if c.Socks.Port < 1024 || c.Socks.Port > 65535 {
-		return c, errors.New("socks.port must be 1024..65535 (unprivileged proxy)")
+	if c.Socks.Port < 1 || c.Socks.Port > 65535 {
+		return c, errors.New("socks.port must be 1..65535")
 	}
-	if c.Socks.Max < 1 || c.Socks.Max > 4096 {
-		return c, errors.New("socks.max_connections must be 1..4096")
+	if c.Socks.Max < 1 || c.Socks.Max > 2147483647 {
+		return c, errors.New("socks.max_connections must be a positive 32-bit integer")
 	}
 	if c.Socks.Resolution != "prefer_ipv6" && c.Socks.Resolution != "prefer_ipv4" {
 		return c, errors.New("socks.resolution must be prefer_ipv6 or prefer_ipv4")
@@ -188,14 +250,14 @@ func decode(b []byte) (Config, error) {
 	if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,14}$`).MatchString(c.Gateway.Interface) {
 		return c, errors.New("invalid gateway.interface")
 	}
-	if c.Gateway.MSS != 0 && (c.Gateway.MSS < 536 || c.Gateway.MSS > 65495) {
-		return c, errors.New("gateway.tcp_mss must be 0 or 536..65495")
+	if c.Gateway.MSS < 0 || c.Gateway.MSS > 65535 {
+		return c, errors.New("gateway.tcp_mss must be 0..65535 (0 disables adjustment)")
 	}
-	c.Socks.Allowed, e = sources(c.Socks.Allowed, false)
+	c.Socks.Allowed, e = sources(c.Socks.Allowed)
 	if e != nil {
 		return c, e
 	}
-	c.Gateway.Allowed, e = sources(c.Gateway.Allowed, true)
+	c.Gateway.Allowed, e = sources(c.Gateway.Allowed)
 	return c, e
 }
 func load(path string) (Config, error) {
@@ -237,9 +299,13 @@ func atomic(path string, b []byte) error {
 	}
 	return nil
 }
+func needsWARP(c Config) bool { return c.Egress.IPv4 == "warp" || c.Egress.IPv6 == "warp" }
 func networkCheck(c Config) error {
 	if _, e := net.InterfaceByName(c.Gateway.Interface); e != nil {
 		return fmt.Errorf("gateway interface: %w", e)
+	}
+	if c.Mode == "gateway" {
+		return nil
 	}
 	a := netip.MustParseAddr(c.Socks.Listen)
 	local := a.IsUnspecified()
@@ -255,9 +321,6 @@ func networkCheck(c Config) error {
 	}
 	if !local {
 		return fmt.Errorf("socks.listen %s is not assigned in this container", a)
-	}
-	if c.Mode == "gateway" {
-		return nil
 	}
 	// An unchanged port may be occupied by our own proxy until reconfiguration.
 	active, e := load(runDir + "/active/config.json")
@@ -283,21 +346,65 @@ func render(c Config, out string) error {
 		family = "46"
 	}
 	proxy := fmt.Sprintf("maxconn %d\ntimeouts 1 5 30 60 180 1800 15 60 15 5\nauth iponly\n", c.Socks.Max)
-	if len(c.Socks.Allowed) > 0 {
-		proxy += fmt.Sprintf("allow * %s * * %s\n", strings.Join(c.Socks.Allowed, ","), ops)
+	// Dual-stack sockets expose IPv4 clients as IPv4-mapped IPv6 addresses.
+	// Match those against IPv4 ACLs first, then prevent ::/0 from implicitly
+	// authorizing IPv4 clients which the IPv4 ACL did not allow.
+	var allowed4, allowed6 []string
+	for _, source := range c.Socks.Allowed {
+		prefix, _ := netip.ParsePrefix(source)
+		if prefix.Addr().Is4() {
+			mapped := netip.AddrFrom16(prefix.Addr().As16())
+			allowed4 = append(allowed4, source, netip.PrefixFrom(mapped, prefix.Bits()+96).String())
+		} else {
+			allowed6 = append(allowed6, source)
+		}
+	}
+	if len(allowed4) > 0 {
+		proxy += fmt.Sprintf("allow * %s * * %s\n", strings.Join(allowed4, ","), ops)
+	}
+	proxy += "deny * 0.0.0.0/0,::ffff:0.0.0.0/96\n"
+	if len(allowed6) > 0 {
+		proxy += fmt.Sprintf("allow * %s * * %s\n", strings.Join(allowed6, ","), ops)
 	}
 	proxy += fmt.Sprintf("deny *\nsetgid 65534\nsetuid 65534\nsocks -%s -i%s -p%d\n", family, c.Socks.Listen, c.Socks.Port)
-	nft := "delete table ip warpdeck_gateway\ntable ip warpdeck_gateway {\n chain forward { type filter hook forward priority -10; policy drop;\n"
-	if c.Mode != "proxy" && len(c.Gateway.Allowed) > 0 {
-		allowed := "{ " + strings.Join(c.Gateway.Allowed, ", ") + " }"
-		nft += fmt.Sprintf("iifname \"CloudflareWARP\" oifname %q ct state established,related accept\n", c.Gateway.Interface)
-		if c.Gateway.MSS > 0 {
-			nft += fmt.Sprintf("iifname %q oifname \"CloudflareWARP\" ip saddr %s tcp flags syn tcp option maxseg size set %d\n", c.Gateway.Interface, allowed, c.Gateway.MSS)
+	// Do not teach clients a route around this gateway when native egress
+	// forwards through the same interface. Later policy changes must still apply.
+	nft := "delete table inet warpdeck_gateway\ntable inet warpdeck_gateway {\n chain proxy_route { type route hook output priority -150; policy accept; meta skuid 65534 meta mark set 0x10910000; meta skuid 65534 ct direction reply meta mark set 0x10920000; }\n chain output { type filter hook output priority -10; policy accept; ip protocol 1 icmp type 5 drop; meta l4proto 58 icmpv6 type 137 drop; }\n chain forward { type filter hook forward priority -10; policy drop;\n"
+	natRules := ""
+	if c.Mode != "proxy" {
+		for _, family := range []int{4, 6} {
+			values := []string{}
+			for _, value := range c.Gateway.Allowed {
+				prefix, _ := netip.ParsePrefix(value)
+				if prefix.Addr().Is4() == (family == 4) {
+					values = append(values, value)
+				}
+			}
+			if len(values) == 0 {
+				continue
+			}
+			af, policy, nat := "ip", c.Egress.IPv4, c.Gateway.NAT.IPv4
+			if family == 6 {
+				af, policy, nat = "ip6", c.Egress.IPv6, c.Gateway.NAT.IPv6
+			}
+			outIf, inIf := `oifname "CloudflareWARP"`, `iifname "CloudflareWARP"`
+			if policy == "native" {
+				outIf, inIf = `oifname != "CloudflareWARP"`, `iifname != "CloudflareWARP"`
+			}
+			allowed := "{ " + strings.Join(values, ", ") + " }"
+			nft += fmt.Sprintf("%s oifname %q %s daddr %s ct state established,related accept\n", inIf, c.Gateway.Interface, af, allowed)
+			match := fmt.Sprintf("iifname %q %s %s saddr %s", c.Gateway.Interface, outIf, af, allowed)
+			if c.Gateway.MSS > 0 {
+				nft += fmt.Sprintf("%s tcp flags syn tcp option maxseg size > %d tcp option maxseg size set %d\n", match, c.Gateway.MSS, c.Gateway.MSS)
+			}
+			nft += match + " accept\n"
+			if nat {
+				natRules += match + " masquerade\n"
+			}
 		}
-		nft += fmt.Sprintf("iifname %q oifname \"CloudflareWARP\" ip saddr %s accept\n }\n chain postrouting { type nat hook postrouting priority srcnat; policy accept; oifname \"CloudflareWARP\" ip saddr %s masquerade\n", c.Gateway.Interface, allowed, allowed)
 	}
-	nft += " }\n}\n"
-	env := fmt.Sprintf("MODE=%s\nINTERFACE=%s\nSOCKS_LISTEN=%s\nSOCKS_PORT=%d\nREVISION=%s\nPROXY_REVISION=%s\n", c.Mode, c.Gateway.Interface, c.Socks.Listen, c.Socks.Port, digest(c), digest(c.Socks))
+	nft += " }\n chain postrouting { type nat hook postrouting priority srcnat; policy accept;\n" + natRules + " }\n}\n"
+	env := fmt.Sprintf("MODE=%s\nINTERFACE=%s\nSOCKS_LISTEN=%s\nSOCKS_PORT=%d\nEGRESS4=%s\nEGRESS6=%s\nREVISION=%s\nPROXY_REVISION=%s\nEGRESS_REVISION=%s\n", c.Mode, c.Gateway.Interface, c.Socks.Listen, c.Socks.Port, c.Egress.IPv4, c.Egress.IPv6, digest(c), digest(c.Socks), digest(c.Egress))
 	for name, b := range map[string][]byte{"config.json": canonical(c), "3proxy.cfg": []byte(proxy), "gateway.nft": []byte(nft), "settings.env": []byte(env)} {
 		if e := atomic(filepath.Join(out, name), b); e != nil {
 			return e
@@ -320,7 +427,7 @@ func wake(event string) error {
 	return e
 }
 func waitApplied(rev string) error {
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(120 * time.Second)
 	for time.Now().Before(deadline) {
 		if read(runDir+"/applied-revision") == rev {
 			return nil
@@ -340,7 +447,7 @@ func lock() (func(), error) {
 	if e != nil {
 		return nil, e
 	}
-	until := time.Now().Add(35 * time.Second)
+	until := time.Now().Add(125 * time.Second)
 	for {
 		e = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if e == nil {
@@ -399,7 +506,7 @@ func change(kind, path, value string) error {
 		return e
 	}
 	if kind != "set" {
-		if read(runDir+"/registration-state") != "registered" {
+		if needsWARP(c) && read(runDir+"/registration-state") != "registered" {
 			return errors.New("WARP is not registered; run warpdeck register --accept-tos first")
 		}
 		if e = networkCheck(c); e != nil {
@@ -512,11 +619,26 @@ func status(asJSON bool) error {
 	if strings.Contains(string(raw), "Status update: Connected") {
 		tunnel = "connected"
 	}
-	result := map[string]any{"name": "WarpDeck", "registration": read(runDir + "/registration-state"), "mode": mode, "requested_mode": requested, "config_path": configPath, "config_in_sync": sync, "config_error": configError, "socks": socks, "ipv4_gateway": gateway, "tunnel": tunnel, "ipv6": "native"}
+	egress := Egress{}
+	if ae == nil {
+		egress = active.Egress
+	}
+	routeState := map[string]string{}
+	for _, family := range []string{"4", "6"} {
+		target := "1.1.1.1"
+		if family == "6" {
+			target = "2606:4700:4700::1111"
+		}
+		routeState["ipv"+family] = "unavailable"
+		if exec.CommandContext(ctx, "ip", "-"+family, "route", "get", target, "mark", "0x10910000").Run() == nil {
+			routeState["ipv"+family] = "available"
+		}
+	}
+	result := map[string]any{"name": "WarpDeck", "registration": read(runDir + "/registration-state"), "mode": mode, "requested_mode": requested, "config_path": configPath, "config_in_sync": sync, "config_error": configError, "socks": socks, "ipv4_gateway": gateway, "tunnel": tunnel, "egress": egress, "routes": routeState, "ipv6_gateway": gateway}
 	if asJSON {
 		fmt.Print(string(canonical(result)))
 	} else {
-		fmt.Printf("WarpDeck\nRegistration: %s\nMode: %s\nConfigured mode: %s\nConfiguration: %s (in sync: %t)\nSOCKS5: %s\nIPv4 gateway: %s\nWARP tunnel: %s\nIPv6: native\n", read(runDir+"/registration-state"), mode, requested, configPath, sync, socks, gateway, tunnel)
+		fmt.Printf("WarpDeck\nRegistration: %s\nMode: %s\nConfigured mode: %s\nConfiguration: %s (in sync: %t)\nSOCKS5: %s\nIPv4 gateway: %s\nWARP tunnel: %s\nIPv6 gateway: %s\nIPv4 egress: %s (route: %s)\nIPv6 egress: %s (route: %s)\n", read(runDir+"/registration-state"), mode, requested, configPath, sync, socks, gateway, tunnel, gateway, egress.IPv4, routeState["ipv4"], egress.IPv6, routeState["ipv6"])
 		if configError != "" {
 			fmt.Println("Configuration error:", configError)
 		}
