@@ -32,6 +32,7 @@ jobs:
       - name: Check source and deployment syntax
         run: |
           bash -n entrypoint.sh common.sh healthcheck.sh
+          bash tests/route-pipeline.sh
           sh -n build.sh scripts/fetch-packages.sh
           python3 -m py_compile tests/integration.py tests/udp_probe.py
           docker compose config --quiet

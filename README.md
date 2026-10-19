@@ -97,6 +97,8 @@ curl -g --fail --max-time 20 --socks5-hostname 127.0.0.1:40000 'https://[2606:47
 
 ## 镜像标签与自动发布
 
+当前版本：[v0.0.1](https://github.com/poohyeban/warpdeck/releases/tag/v0.0.1)。修复隧道路由检测中的管道误判，详情见 [更新记录](CHANGELOG.md)。
+
 镜像地址：[ghcr.io/poohyeban/warpdeck](https://github.com/poohyeban/warpdeck/pkgs/container/warpdeck)。构建记录：[GitHub Actions](https://github.com/poohyeban/warpdeck/actions/workflows/image.yml)。
 
 | 引用 | 用途 |
@@ -104,7 +106,7 @@ curl -g --fail --max-time 20 --socks5-hostname 127.0.0.1:40000 'https://[2606:47
 | `ghcr.io/poohyeban/warpdeck:latest` | `main` 分支最近一次成功发布，默认部署使用 |
 | `ghcr.io/poohyeban/warpdeck:main` | 与主分支发布对应 |
 | `ghcr.io/poohyeban/warpdeck:sha-<完整提交 SHA>` | 按源码提交查找镜像；同一提交重新构建时仍可能更新 |
-| `ghcr.io/poohyeban/warpdeck:1.2.3` | 推送 `v1.2.3` 这类版本标签时生成；这里只是格式示例，不代表该版本已发布 |
+| `ghcr.io/poohyeban/warpdeck:0.0.1` | 对应 `v0.0.1` 版本标签，通过发布工作流构建 |
 | `ghcr.io/poohyeban/warpdeck@sha256:<摘要>` | 按 digest 固定镜像内容，适合需要可复现部署与精确回退的用户 |
 
 通过环境变量选择已有标签或 digest。建议把选择写入本机 `.env`（已被 Git 忽略），之后每次 Compose 操作都会使用同一镜像：
@@ -118,7 +120,7 @@ docker compose up -d
 
 需要固定版本时，将 `.env` 中的值换成包页面实际存在的标签或 digest。`latest` 和 `main` 是移动标签；获取镜像的新版本需要手动 `pull` 并重建容器，运行中的容器不会自动更新。仅发布 `linux/amd64`；Apple Silicon 或 ARM VPS 不属于原生支持平台。
 
-工作流在推送 `main`、推送 `v*` 标签或手动运行时构建；PR 只构建和检查，不登录 GHCR、不发布。手动运行限定在 `main` 或 `v*` 标签。构建包含 Go 单元测试、动态库检查，以及镜像命令、默认 JSON 与隔离命名空间内的规则语法校验；检查通过后才发布。Actions 不进行 WARP 注册，不包含注册身份，也不连接任何现有服务器。端到端 WARP 网络测试仍需在独立测试环境执行。
+工作流在推送 `main`、推送 `v*` 标签或手动运行时构建；PR 只构建和检查，不登录 GHCR、不发布。手动运行限定在 `main` 或 `v*` 标签。构建包含路由管道回归测试、Go 单元测试、动态库检查，以及镜像命令、默认 JSON 与隔离命名空间内的规则语法校验；检查通过后才发布。Actions 不进行 WARP 注册，不包含注册身份，也不连接任何现有服务器。端到端 WARP 网络测试仍需在独立测试环境执行。
 
 发布使用仓库自带的 `GITHUB_TOKEN`，不需要在仓库保存个人 PAT。第三方 Actions 固定到提交 SHA；镜像带源码链接和源码 revision 标签。首次创建 GHCR 包时，维护者需要在包设置中确认其可见性为 Public；公开仓库不会自动保证包也公开。参见 [GitHub 包可见性说明](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility)。Fork 项目会发布到 Fork 所有者的 GHCR 命名空间，需相应修改本机 `WARPDECK_IMAGE`；包首次公开设置也需自行完成。
 
@@ -426,6 +428,7 @@ WarpDeck 会维护官方客户端的排除表，让自己的路由策略控制�
 .
 ├── .github/workflows/image.yml  # 构建、检查并发布到 GHCR
 ├── Dockerfile                  # 多阶段构建与运行依赖
+├── CHANGELOG.md                # 版本更新记录
 ├── compose.yaml                # 默认拉取 GHCR；无宿主机接管脚本
 ├── config.example.json         # 完整默认业务配置：SOCKS、双栈 WARP、允许全部来源
 ├── build.sh                    # 镜像构建入口
@@ -438,6 +441,7 @@ WarpDeck 会维护官方客户端的排除表，让自己的路由策略控制�
 ├── scripts/fetch-packages.sh   # 固定版本下载和 SHA-256 校验
 ├── tests/
 │   ├── integration.py          # 隔离网络端到端验证
+│   ├── route-pipeline.sh       # pipefail/SIGPIPE 路由检测回归测试
 │   └── udp_probe.py            # UDP DNS 与 SOCKS5 UDP 探测
 ├── go.mod
 ├── .dockerignore               # 构建上下文允许列表

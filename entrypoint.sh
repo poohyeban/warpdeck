@@ -100,11 +100,13 @@ setup_routes() {
   active_iface=$INTERFACE
 }
 ensure_routes() {
+  # Drain producers under pipefail: grep -q can cause SIGPIPE and make a
+  # present address look absent, incorrectly deleting working tunnel routes.
   for af in 4 6; do
     local policy=$EGRESS4
     [[ "$af" != 6 ]] || policy=$EGRESS6
-    if [[ "$policy" == warp ]] && ip -"$af" addr show dev CloudflareWARP 2>/dev/null | grep -q 'inet'; then
-      if ! ip -"$af" route show table 1091 | grep -q 'default dev CloudflareWARP'; then
+    if [[ "$policy" == warp ]] && ip -"$af" addr show dev CloudflareWARP 2>/dev/null | grep 'inet' >/dev/null; then
+      if ! ip -"$af" route show table 1091 | grep 'default dev CloudflareWARP' >/dev/null; then
         ip -"$af" route replace default dev CloudflareWARP table 1091 || true
         ip -"$af" route replace default dev CloudflareWARP table 1094 || true
       fi
@@ -126,7 +128,7 @@ configure_warp() {
   # routing/firewall exclusions broad, so it cannot override our marks, block
   # public SOCKS clients, or silently choose an egress before our rules run.
   for range in 0.0.0.0/0 ::/0; do
-    if ! warp_command tunnel ip list | awk '{for(i=1;i<=NF;i++)print $i}' | grep -Fxq "$range"; then
+    if ! warp_command tunnel ip list | awk '{for(i=1;i<=NF;i++)print $i}' | grep -Fx "$range" >/dev/null; then
       warp_command tunnel ip add-range "$range" || return 1
     fi
   done
