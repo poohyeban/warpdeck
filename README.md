@@ -7,12 +7,15 @@
 ## 目录
 
 - [功能与边界](#功能与边界)
+- [给部署 Agent 的操作约定](#给部署-agent-的操作约定)
 - [拉取镜像和首次启动](#拉取镜像和首次启动)
 - [镜像标签与自动发布](#镜像标签与自动发布)
 - [JSON 是唯一业务配置入口](#json-是唯一业务配置入口)
 - [命令](#命令)
 - [切换与失败处理](#切换与失败处理)
 - [接入与 IPv6](#接入与-ipv6)
+- [仅本机与其他容器使用 SOCKS5](#仅本机与其他容器使用-socks5)
+- [部署验收](#部署验收)
 - [运行与构建](#运行与构建)
 - [日常维护与升级](#日常维护与升级)
 - [故障排查](#故障排查)
@@ -31,7 +34,20 @@
 | 持久化 | 注册身份和业务状态分别存入数据卷；重启恢复最后明确应用的配置 |
 | 宿主机接入 | 用户自行决定路由、防火墙及客户端接入；启动容器不会接管整机网络 |
 
-提供 GHCR 镜像 **`ghcr.io/poohyeban/warpdeck:latest`**，用户可以直接拉取，也可从源码构建。仅支持 **Linux amd64**，没有 ARM64 原生镜像。SOCKS 使用来源 IP 认证，不提供用户名/密码认证；如果多个客户端经过同一个 NAT，容器只能按它实际看到的来源地址区分。示例将 TCP 40000 发布到宿主机所有地址；用户可自行调整 Docker 端口发布范围。
+提供 GHCR 镜像，稳定部署建议使用 **`ghcr.io/poohyeban/warpdeck:0.0.1`** 并固定 digest，也可从源码构建。仅支持 **Linux amd64**，没有 ARM64 原生镜像。SOCKS 使用来源 IP 认证，不提供用户名/密码认证；如果多个客户端经过同一个 NAT，容器只能按它实际看到的来源地址区分。**仓库的通用 Compose 仍默认使用 `latest`，将 TCP 40000 发布到宿主机所有地址，默认 JSON 允许全部来源。** 首次启动前必须按所需接入范围调整；仅供本机或容器使用时，按[本机部署步骤](#仅本机与其他容器使用-socks5)限制入口。
+
+## 给部署 Agent 的操作约定
+
+本节适用于帮助用户部署、升级或排障的 agent。已有用户要求优先；不要重复询问已经明确的选择，也不要把某一台服务器的路径、端口或网络当作项目默认值。
+
+1. **先检查现状。** 核对架构、Docker/Compose、TUN、已有容器、镜像、Compose 项目名和实际挂载。升级已有部署时读取该部署的 Compose 与已应用状态，保留目录、端口、来源列表、数据卷和注册身份；不要用仓库示例覆盖现有配置。
+2. **确定业务需求。** 明确 `proxy` / `gateway` / `both`、两个地址族各自的出口、客户端位置、监听端口和允许来源。只需要 SOCKS5 时用 `proxy`；宿主机没有原生 IPv6 不代表应禁用 WARP IPv6。用户没有说明的关键接入需求才需要询问。
+3. **分别配置两层。** Compose 管镜像、发布端口、网络、挂载和资源；JSON 管业务行为。保存 JSON 后执行 `reload` 或 `config apply`，再确认 `config_in_sync=true`。宿主机端口、容器端口和 JSON 端口不要混淆。
+4. **遵守网络范围。** 容器只处理进入它的流量。不要为了部署代理添加宿主机策略路由、手工防火墙规则或改 DNS，也不要使用 host 网络、特权模式或 Docker socket。Docker 桥接和端口映射本身会创建宿主机规则；若用户连这些自动规则也禁止，先明确可用网络方案，不能声称普通桥接 Compose 完全不改宿主机规则。
+5. **固定版本并保留恢复路径。** 按[升级步骤](#日常维护与升级)保存旧镜像引用和私有备份，核对新镜像版本、源码 revision 和 digest，只重建 `warp` 服务。已有注册不需要重新注册；`--accept-tos` 表示接受 Cloudflare 条款，不能把它当作普通健康检查。
+6. **以实际请求验收。** 同时检查 Docker 健康、应用状态和每个启用地址族的真实请求，并从实际客户端位置验证接入。按用户约定观察时长；未指定时可用下方约 1 分钟示例。报告成功轮数、重启情况和检查范围，不把短时通过描述成长期稳定保证。成功后才按明确镜像引用清理旧资源，不全局 prune，不删除卷。
+
+通过 `ssh ... 'bash -s'` 给远程 shell 输送脚本时，避免后续命令读取脚本输入：使用不带 `-i` 的 `docker exec`，或为 `docker compose exec -T ...` 加 `< /dev/null`。非交互 agent 命令使用 `-T`；不要分配不需要的终端。
 
 ## 拉取镜像和首次启动
 
@@ -56,10 +72,16 @@ cd warpdeck
 
 ```sh
 mkdir warpdeck && cd warpdeck
-curl -fL https://raw.githubusercontent.com/poohyeban/warpdeck/main/compose.yaml -o compose.yaml
+curl -fL https://raw.githubusercontent.com/poohyeban/warpdeck/v0.0.1/compose.yaml -o compose.yaml
 ```
 
-以上两种方式选一种即可。检查宿主机环境后拉取、启动：
+以上两种方式选一种即可。先按接入范围修改 Compose 的 `ports`（[本机示例](#仅本机与其他容器使用-socks5)），再选择镜像。以下写入命令只用于尚无 `.env` 的新目录；已有文件只修改 `WARPDECK_IMAGE` 一项，保留其他变量：
+
+```sh
+printf '%s\n' 'WARPDECK_IMAGE=ghcr.io/poohyeban/warpdeck:0.0.1' > .env
+```
+
+检查宿主机环境后拉取、启动：
 
 ```sh
 docker version
@@ -81,7 +103,7 @@ docker compose exec warp warpdeck status
 
 注册使用官方 `warp-cli registration new`，身份保存在独立的 `warp-data` 数据卷。已有身份会复用；重复执行注册命令不会更换身份，注册失败也不会删除已有数据。构建镜像时不注册，不包含任何机器的身份。
 
-默认已允许全部来源，可直接验证两个目标地址族：
+完成注册和所需来源限制后，验证两个目标地址族（若改过宿主机端口，相应替换 `40000`）：
 
 ```sh
 curl --fail --max-time 20 --socks5-hostname 127.0.0.1:40000 https://1.1.1.1/cdn-cgi/trace
@@ -103,22 +125,24 @@ curl -g --fail --max-time 20 --socks5-hostname 127.0.0.1:40000 'https://[2606:47
 
 | 引用 | 用途 |
 | --- | --- |
-| `ghcr.io/poohyeban/warpdeck:latest` | `main` 分支最近一次成功发布，默认部署使用 |
+| `ghcr.io/poohyeban/warpdeck:latest` | `main` 分支最近一次成功发布，通用 Compose 的回退默认值，可能先于稳定版本变化 |
 | `ghcr.io/poohyeban/warpdeck:main` | 与主分支发布对应 |
 | `ghcr.io/poohyeban/warpdeck:sha-<完整提交 SHA>` | 按源码提交查找镜像；同一提交重新构建时仍可能更新 |
 | `ghcr.io/poohyeban/warpdeck:0.0.1` | 对应 `v0.0.1` 版本标签，通过发布工作流构建 |
-| `ghcr.io/poohyeban/warpdeck@sha256:<摘要>` | 按 digest 固定镜像内容，适合需要可复现部署与精确回退的用户 |
+| `ghcr.io/poohyeban/warpdeck:0.0.1@sha256:<摘要>` | 同时标明版本并固定镜像内容，建议用于稳定部署；摘要以实际拉取结果为准 |
 
 通过环境变量选择已有标签或 digest。建议把选择写入本机 `.env`（已被 Git 忽略），之后每次 Compose 操作都会使用同一镜像：
 
 ```sh
-# 默认跟随主分支最近一次成功构建
-printf '%s\n' 'WARPDECK_IMAGE=ghcr.io/poohyeban/warpdeck:latest' > .env
-docker compose pull
-docker compose up -d
+# 先拉取目标版本，再检查其仓库摘要与源码版本
+docker pull ghcr.io/poohyeban/warpdeck:0.0.1
+docker image inspect ghcr.io/poohyeban/warpdeck:0.0.1 \
+  --format 'digests={{json .RepoDigests}} version={{index .Config.Labels "org.opencontainers.image.version"}} revision={{index .Config.Labels "org.opencontainers.image.revision"}}'
 ```
 
-需要固定版本时，将 `.env` 中的值换成包页面实际存在的标签或 digest。`latest` 和 `main` 是移动标签；获取镜像的新版本需要手动 `pull` 并重建容器，运行中的容器不会自动更新。仅发布 `linux/amd64`；Apple Silicon 或 ARM VPS 不属于原生支持平台。
+把 `.env` 的 `WARPDECK_IMAGE` 改为 `ghcr.io/poohyeban/warpdeck:0.0.1@sha256:<RepoDigests 中的实际摘要>`，不要把示例占位符原样写入。`RepoDigests` 中仓库引用的摘要用于拉取固定内容，不能用容器 ID、源码 SHA 或随意选取的本地镜像 ID 替代。随后执行 `docker compose config --quiet` 和 `docker compose config --images` 核对解析结果；shell 中同名变量也可能覆盖 `.env`。
+
+`latest` 和 `main` 是移动标签，版本标签也不能替代内容摘要；获取镜像的新版本需要手动 `pull` 并重建容器，运行中的容器不会自动更新。仅发布 `linux/amd64`；Apple Silicon 或 ARM VPS 不属于原生支持平台。
 
 工作流在推送 `main`、推送 `v*` 标签或手动运行时构建；PR 只构建和检查，不登录 GHCR、不发布。手动运行限定在 `main` 或 `v*` 标签。构建包含路由管道回归测试、Go 单元测试、动态库检查，以及镜像命令、默认 JSON 与隔离命名空间内的规则语法校验；检查通过后才发布。Actions 不进行 WARP 注册，不包含注册身份，也不连接任何现有服务器。端到端 WARP 网络测试仍需在独立测试环境执行。
 
@@ -312,6 +336,103 @@ docker compose exec warp warpdeck reload
 
 `prefer_ipv6` 使用 3proxy `-64`，`prefer_ipv4` 使用 `-46`；这控制域名解析优先级，明确指定 IP 时保留其地址族。不实现连接失败后的 Happy Eyeballs 竞速或跨地址族重试。地址族不可达时请求失败，用户可按自己的需要调整策略或解析偏好。
 
+## 仅本机与其他容器使用 SOCKS5
+
+以下是可选部署方案：宿主机通过 `127.0.0.1:40000` 使用代理，接入同一 Docker 网络的客户端通过 `warp:1080` 使用代理。它保持 `proxy` 模式，不接管宿主机或客户端容器的默认路由。客户端应用仍需显式配置 SOCKS5；接入网络本身不会自动代理流量。
+
+**首次 `up` 前**直接修改部署用的 `compose.yaml`。在已有字段上替换下列值，其余设备、权限、sysctl、卷、资源限制和健康检查保持不变。下面仅是修改位置示意，不是完整 Compose：
+
+```yaml
+services:
+  warp:
+    ports:
+      - "127.0.0.1:40000:1080/tcp"
+networks:
+  gateway:
+    name: warpdeck_proxy
+```
+
+不要简单在另一份覆盖文件中追加本机 `ports`：[Compose 合并规则](https://docs.docker.com/reference/compose-file/merge/#unique-resources)可能保留原有公开映射。启动前用 `docker compose config` 确认只有预期的发布地址。先检查网段 `172.28.80.0/24`、`fd80:28::/64` 及网络名称无冲突；已有部署保留其实际网络名。该网络应专用于可信代理客户端。
+
+按[首次启动](#拉取镜像和首次启动)完成启动和注册后，保存并应用本机方案。若改过桥接网段，以下白名单也要同步替换：
+
+```sh
+docker compose exec -T warp warpdeck mode proxy
+docker compose exec -T warp warpdeck config set socks.listen '"::"'
+docker compose exec -T warp warpdeck config set socks.port 1080
+docker compose exec -T warp warpdeck config set socks.allowed_sources '["127.0.0.1/32","::1/128","172.28.80.0/24","fd80:28::/64"]'
+docker compose exec -T warp warpdeck config set gateway.allowed_sources '[]'
+docker compose exec -T warp warpdeck config set egress '{"ipv4":"warp","ipv6":"warp"}'
+docker compose exec -T warp warpdeck config validate
+docker compose exec -T warp warpdeck reload
+docker compose exec -T warp warpdeck status --json
+```
+
+这里 `::` 是**容器内**的双栈监听地址；公开范围由宿主机发布地址和来源白名单共同限制。不要把容器内监听改成 `127.0.0.1` 来限制宿主机入口，否则 Docker 转发和其他容器将无法连接。通过宿主机端口访问时，容器可能看到桥接网关来源，因此白名单包含桥接网段。宿主机入口仅绑定 IPv4 回环；这不会阻止该代理访问 IPv6 目标。
+
+需要代理的另一个 Compose 项目可以在其**现有**网络配置中添加以下网络；保留客户端原有网络、卷和业务配置，不要整份替换服务：
+
+```yaml
+services:
+  client: # 替换为实际客户端服务名
+    networks:
+      - default
+      - warp_proxy
+networks:
+  default: {}
+  warp_proxy:
+    external: true
+    name: warpdeck_proxy
+```
+
+先创建 WarpDeck 网络，再重建需要接入的客户端服务。在该网络中将应用的 SOCKS5 服务端设为 `warp:1080`；支持 URI 的客户端可使用 `socks5h://warp:1080`，让代理解析域名。客户端容器里的 `127.0.0.1` 指向客户端自身，不能用它访问宿主机发布端口。如果客户端采用 host 网络，则可使用宿主机的 `127.0.0.1:40000`，无需把 WarpDeck 改成 host 网络。同一共享网络内避免重复使用 `warp` 别名。
+
+从实际客户端验证，例如其中已安装 curl 时执行：
+
+```sh
+curl --fail --max-time 10 --socks5-hostname warp:1080 https://1.1.1.1/cdn-cgi/trace
+curl -g --fail --max-time 10 --socks5-hostname warp:1080 'https://[2606:4700:4700::1111]/cdn-cgi/trace'
+```
+
+需要纯容器入口时，可移除宿主机 `ports` 发布；需要公网入口时，应根据实际来源明确配置绑定地址和白名单。仅发布 TCP 仍不解决 UDP ASSOCIATE 的动态端口接入，参见[接入与 IPv6](#接入与-ipv6)。
+
+## 部署验收
+
+先等首次注册和连接完成，确认 `docker compose ps` 为 healthy、`warpdeck status --json` 的模式和出口符合预期、`config_in_sync=true`。`proxy` 下两个 gateway 状态应为 `disabled`。健康检查和 `reload` 都不是公网连通性证明。
+
+下方在 **Bash** 中执行，适用于宿主机本地 TCP 入口、双栈 WARP 的 `proxy` / `both` 部署。根据实际部署修改 `proxy_address`；选择 `native` 的地址族应单独验证其预期出口，不套用 `warp=on` 断言。`gateway` 模式需从已接入的网关客户端发请求，不使用 SOCKS 示例。
+
+```bash
+set -euo pipefail
+proxy_address=127.0.0.1:40000
+container_id=$(docker compose ps -q warp)
+test -n "$container_id"
+initial_restarts=$(docker inspect --format '{{.RestartCount}}' "$container_id")
+started=$SECONDS
+rounds=0
+while (( SECONDS - started < 60 )); do
+  test "$(docker inspect --format '{{.State.Health.Status}}' "$container_id")" = healthy
+  docker exec "$container_id" /usr/local/sbin/healthcheck.sh
+  for target in https://1.1.1.1/cdn-cgi/trace 'https://[2606:4700:4700::1111]/cdn-cgi/trace'; do
+    trace=$(curl -g -fsS --max-time 8 --socks5-hostname "$proxy_address" "$target")
+    printf '%s\n' "$trace" | grep -x 'warp=on' >/dev/null
+  done
+  rounds=$((rounds + 1))
+  printf 'round=%s elapsed=%ss ipv4=ok ipv6=ok\n' "$rounds" "$((SECONDS-started))"
+  remaining=$((60-SECONDS+started))
+  if (( remaining > 5 )); then sleep 5
+  elif (( remaining > 0 )); then sleep "$remaining"
+  fi
+done
+test "$(docker inspect --format '{{.RestartCount}}' "$container_id")" = "$initial_restarts"
+test "$(docker inspect --format '{{.State.OOMKilled}}' "$container_id")" = false
+printf 'passed=%s rounds elapsed=%ss\n' "$rounds" "$((SECONDS-started))"
+```
+
+任何失败都会返回非零并停止；请求耗时可能使总时长略超过 60 秒。`nc`、TCP 端口连接成功或仅有 `healthy` 都不能代替 SOCKS 请求。需要域名访问时还应验证一个实际业务域名，IP 目标测试不覆盖 DNS；需要 UDP 时另外验证 UDP。其他容器使用的部署还需从该客户端运行请求，不能只测试宿主机入口。
+
+升级前后核对注册身份和两份配置（`config.json`、`applied.json`）、其他服务状态以及宿主机默认路由、策略路由、DNS。身份文件只做本地校验或私有备份，不打印内容。比较路由快照时先排序，并识别 Docker 重建导致的 veth 名称变化、动态过期时间等正常差异；不要仅因文本顺序变化判定宿主机网络被修改，也不要忽略实际下一跳或策略变化。
+
 ## 运行与构建
 
 仅一个官方 `warp-svc`，三种模式均使用 `tunnel_only`；需要 SOCKS 时运行一个低权限 3proxy 进程。Bash 监督进程接收明确的应用请求并监督进程、维护隧道路由，不扫描 JSON 文件。Go 编写的 `warpdeck` 仅在命令、配置检查和健康检查时短暂执行，不是常驻服务；编译器不进入镜像。
@@ -364,29 +485,38 @@ Compose 默认限制容器内存为 256 MiB、内存与 Swap 合计为 384 MiB�
 更新前保留当前镜像，并备份两个数据卷到仓库外的私有位置。`warp-data` 含 WARP 身份；`warpdeck-state` 含请求配置和已应用快照，应同时保留。分享诊断材料前检查账户信息，不要提交卷内容或实际部署的 Compose 覆盖文件。
 
 ```sh
-# 保留当前镜像，便于回退；每次更新使用不同的备份标签
-docker image tag "$(docker inspect --format '{{.Image}}' "$(docker compose ps -q warp)")" warpdeck:before-update
+# 保留当前镜像，便于回退；记下输出的标签
+set -eu
+rollback_image="warpdeck:before-update-$(date +%Y%m%d-%H%M%S)"
+docker image tag "$(docker inspect --format '{{.Image}}' "$(docker compose ps -q warp)")" "$rollback_image"
+printf 'rollback image: %s\n' "$rollback_image"
 
 # 拉取 .env / Compose 当前选择的镜像
 # 如果固定了旧版本或 digest，先将 .env 改为计划升级的引用
-docker compose pull
+docker compose config --quiet
+docker compose config --images
+docker compose pull warp
 
 # 重建会短暂中断本容器承载的连接
-docker compose up -d
+docker compose up -d --no-deps --pull never warp
 docker compose ps
 docker compose exec warp warpdeck status
 ```
+
+镜像拉取失败时先停止升级，旧容器可继续运行；不要先删除旧容器或镜像。固定 digest 时按[镜像标签说明](#镜像标签与自动发布)先拉取、核对目标版本，再更新 `.env`，保留其他变量。备份还应包含原 `.env`、Compose 文件和数据卷的实际名称或绑定路径；需要一致的数据备份时安排短暂停机。重建后完成[部署验收](#部署验收)，失败时保留诊断材料并恢复旧镜像；数据格式不兼容时还需恢复匹配的配置备份。
 
 只下载了 Compose 文件的用户也能执行上述升级，不需要 `git pull` 或源码构建。需要更新 Compose 本身时单独审查部署文件变化；不要覆盖自己已有的网络配置。自行构建的用户使用 `sh build.sh --pull` 重建，并保持 `.env` 指向本地镜像。
 
 升级保留原数据卷和 Compose 项目名。不要随意改变项目目录名或 `-p` 项目名：Compose 会按项目名寻找数据卷，名称变化可能表现为“身份丢失、重新要求注册”。需要固定名称时，在首次部署就选定 `docker compose -p <项目名> ...` 并持续使用。
 
-若需要回退镜像，且旧版本与现有数据格式兼容：
+若需要回退镜像，且旧版本与现有数据格式兼容，将 `.env` 中的 `WARPDECK_IMAGE` 改为此前记录的 `warpdeck:before-update-<时间>`（保留其他变量），然后执行：
 
 ```sh
-printf '%s\n' 'WARPDECK_IMAGE=warpdeck:before-update' > .env
-docker compose up -d --pull never --force-recreate
+docker compose config --images
+docker compose up -d --no-deps --pull never --force-recreate warp
 ```
+
+新版本验收通过后，按需要保留回退镜像一段时间，或用 `docker image rm <已核对的旧引用>` 精确清理。先检查 `docker ps -a` 和 `docker image ls --digests`，确认旧镜像没有其他使用者；不加 `--force`。一个镜像可能有多个标签和摘要引用，按实际引用逐一处理。共享层仍被新镜像使用时不会释放，不能把旧镜像显示的总大小当作净释放空间。只有本机自行构建过 WarpDeck 才需要考虑构建缓存，按确认过的缓存 ID 定向清理；不要运行全局 `docker system prune -a`、删除其他项目镜像或清理卷。
 
 不要用 `docker compose down -v` 作为修复或升级步骤，它会删除数据卷。普通 `restart` 也不是应用待确认 JSON 的命令；确认修改仍应执行 `warpdeck reload`。修改 Compose 端口、资源或挂载配置则需要 `docker compose up -d` 重建，与容器内 JSON 的应用是两个独立操作。
 
@@ -409,6 +539,7 @@ docker compose up -d --pull never --force-recreate
 | 网络地址冲突 | 部署前修改 Compose 的通用桥接网段、容器地址以及对应的来源白名单 |
 | 重启后仍为旧模式 | 有未确认修改时属于预期行为；重启恢复上次已应用快照，明确 reload 才切换 |
 | Docker 状态持续 unhealthy | 使用下面的诊断命令检查连接与健康检查；Docker 健康状态本身不会触发重启 |
+| 旧版本间歇 unhealthy，同时 IPv6 请求失败 | `0.0.1` 修复了 `pipefail` 下管道提前退出导致的路由误判；先核对实际镜像 revision，升级后验证真实 IPv6 请求。仍失败时继续检查隧道与路由，不通过关闭健康检查掩盖问题 |
 
 ```sh
 docker compose exec warp warpdeck status --json
