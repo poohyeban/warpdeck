@@ -34,7 +34,7 @@
 | 持久化 | 注册身份和业务状态分别存入数据卷；重启恢复最后明确应用的配置 |
 | 宿主机接入 | 用户自行决定路由、防火墙及客户端接入；启动容器不会接管整机网络 |
 
-提供 GHCR 镜像，稳定部署建议使用 **`ghcr.io/poohyeban/warpdeck:0.0.1`** 并固定 digest，也可从源码构建。仅支持 **Linux amd64**，没有 ARM64 原生镜像。SOCKS 使用来源 IP 认证，不提供用户名/密码认证；如果多个客户端经过同一个 NAT，容器只能按它实际看到的来源地址区分。**仓库的通用 Compose 仍默认使用 `latest`，将 TCP 40000 发布到宿主机所有地址，默认 JSON 允许全部来源。** 首次启动前必须按所需接入范围调整；仅供本机或容器使用时，按[本机部署步骤](#仅本机与其他容器使用-socks5)限制入口。
+提供 GHCR 镜像，稳定部署建议使用 **`ghcr.io/poohyeban/warpdeck:0.0.2`** 并固定 digest，也可从源码构建。仅支持 **Linux amd64**，没有 ARM64 原生镜像。SOCKS 使用来源 IP 认证，不提供用户名/密码认证；如果多个客户端经过同一个 NAT，容器只能按它实际看到的来源地址区分。**仓库的通用 Compose 仍默认使用 `latest`，将 TCP 40000 发布到宿主机所有地址，默认 JSON 允许全部来源。** 首次启动前必须按所需接入范围调整；仅供本机或容器使用时，按[本机部署步骤](#仅本机与其他容器使用-socks5)限制入口。
 
 ## 给部署 Agent 的操作约定
 
@@ -72,13 +72,13 @@ cd warpdeck
 
 ```sh
 mkdir warpdeck && cd warpdeck
-curl -fL https://raw.githubusercontent.com/poohyeban/warpdeck/v0.0.1/compose.yaml -o compose.yaml
+curl -fL https://raw.githubusercontent.com/poohyeban/warpdeck/v0.0.2/compose.yaml -o compose.yaml
 ```
 
 以上两种方式选一种即可。先按接入范围修改 Compose 的 `ports`（[本机示例](#仅本机与其他容器使用-socks5)），再选择镜像。以下写入命令只用于尚无 `.env` 的新目录；已有文件只修改 `WARPDECK_IMAGE` 一项，保留其他变量：
 
 ```sh
-printf '%s\n' 'WARPDECK_IMAGE=ghcr.io/poohyeban/warpdeck:0.0.1' > .env
+printf '%s\n' 'WARPDECK_IMAGE=ghcr.io/poohyeban/warpdeck:0.0.2' > .env
 ```
 
 检查宿主机环境后拉取、启动：
@@ -119,7 +119,7 @@ curl -g --fail --max-time 20 --socks5-hostname 127.0.0.1:40000 'https://[2606:47
 
 ## 镜像标签与自动发布
 
-当前版本：[v0.0.1](https://github.com/poohyeban/warpdeck/releases/tag/v0.0.1)。修复隧道路由检测中的管道误判，详情见 [更新记录](CHANGELOG.md)。
+当前版本：[v0.0.2](https://github.com/poohyeban/warpdeck/releases/tag/v0.0.2)。构建时跟随最新稳定版 Go 和 WARP，详情见 [更新记录](CHANGELOG.md)。
 
 镜像地址：[ghcr.io/poohyeban/warpdeck](https://github.com/poohyeban/warpdeck/pkgs/container/warpdeck)。构建记录：[GitHub Actions](https://github.com/poohyeban/warpdeck/actions/workflows/image.yml)。
 
@@ -128,19 +128,19 @@ curl -g --fail --max-time 20 --socks5-hostname 127.0.0.1:40000 'https://[2606:47
 | `ghcr.io/poohyeban/warpdeck:latest` | `main` 分支最近一次成功发布，通用 Compose 的回退默认值，可能先于稳定版本变化 |
 | `ghcr.io/poohyeban/warpdeck:main` | 与主分支发布对应 |
 | `ghcr.io/poohyeban/warpdeck:sha-<完整提交 SHA>` | 按源码提交查找镜像；同一提交重新构建时仍可能更新 |
-| `ghcr.io/poohyeban/warpdeck:0.0.1` | 对应 `v0.0.1` 版本标签，通过发布工作流构建 |
-| `ghcr.io/poohyeban/warpdeck:0.0.1@sha256:<摘要>` | 同时标明版本并固定镜像内容，建议用于稳定部署；摘要以实际拉取结果为准 |
+| `ghcr.io/poohyeban/warpdeck:0.0.2` | 对应 `v0.0.2` 版本标签，通过发布工作流构建 |
+| `ghcr.io/poohyeban/warpdeck:0.0.2@sha256:<摘要>` | 同时标明版本并固定镜像内容，建议用于稳定部署；摘要以实际拉取结果为准 |
 
 通过环境变量选择已有标签或 digest。建议把选择写入本机 `.env`（已被 Git 忽略），之后每次 Compose 操作都会使用同一镜像：
 
 ```sh
 # 先拉取目标版本，再检查其仓库摘要与源码版本
-docker pull ghcr.io/poohyeban/warpdeck:0.0.1
-docker image inspect ghcr.io/poohyeban/warpdeck:0.0.1 \
+docker pull ghcr.io/poohyeban/warpdeck:0.0.2
+docker image inspect ghcr.io/poohyeban/warpdeck:0.0.2 \
   --format 'digests={{json .RepoDigests}} version={{index .Config.Labels "org.opencontainers.image.version"}} revision={{index .Config.Labels "org.opencontainers.image.revision"}}'
 ```
 
-把 `.env` 的 `WARPDECK_IMAGE` 改为 `ghcr.io/poohyeban/warpdeck:0.0.1@sha256:<RepoDigests 中的实际摘要>`，不要把示例占位符原样写入。`RepoDigests` 中仓库引用的摘要用于拉取固定内容，不能用容器 ID、源码 SHA 或随意选取的本地镜像 ID 替代。随后执行 `docker compose config --quiet` 和 `docker compose config --images` 核对解析结果；shell 中同名变量也可能覆盖 `.env`。
+把 `.env` 的 `WARPDECK_IMAGE` 改为 `ghcr.io/poohyeban/warpdeck:0.0.2@sha256:<RepoDigests 中的实际摘要>`，不要把示例占位符原样写入。`RepoDigests` 中仓库引用的摘要用于拉取固定内容，不能用容器 ID、源码 SHA 或随意选取的本地镜像 ID 替代。随后执行 `docker compose config --quiet` 和 `docker compose config --images` 核对解析结果；shell 中同名变量也可能覆盖 `.env`。
 
 `latest` 和 `main` 是移动标签，版本标签也不能替代内容摘要；获取镜像的新版本需要手动 `pull` 并重建容器，运行中的容器不会自动更新。仅发布 `linux/amd64`；Apple Silicon 或 ARM VPS 不属于原生支持平台。
 
