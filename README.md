@@ -439,7 +439,7 @@ printf 'passed=%s rounds elapsed=%ss\n' "$rounds" "$((SECONDS-started))"
 
 关键进程退出会导致容器退出，由 `restart: unless-stopped` 恢复；健康检查本身不自动重启 unhealthy 容器。日志与资源限制由 Compose 设置。
 
-Dockerfile 使用公开的 `debian:bookworm-slim` 和官方 Go 构建镜像。独立构建阶段编译控制程序并运行单元测试；另一个阶段下载并校验固定版本的 Cloudflare WARP 与 3proxy 软件包，只提取命令行运行文件和版权资料。运行镜像不包含编译器、WARP GUI 或 WebKit，不执行下载包的维护脚本。
+Dockerfile 使用公开的 `debian:bookworm-slim` 和官方 Go 构建镜像。独立构建阶段编译控制程序并运行单元测试；另一个阶段从 Cloudflare 签名软件源下载最新稳定版 WARP，并下载校验固定版本的 3proxy 软件包，只提取命令行运行文件和版权资料。运行镜像不包含编译器、WARP GUI 或 WebKit，不执行下载包的维护脚本。
 
 ```sh
 # 可选：自行构建，不使用 GHCR 成品镜像
@@ -452,7 +452,9 @@ docker compose up -d --pull never
 
 自行构建需要访问 Docker Hub、Debian 软件源、Cloudflare 软件源与 GitHub。Compose 默认只拉取镜像，不含 `build` 指令；本地构建统一使用 `build.sh`。
 
-当前固定 WARP `2026.8.2110.0`、3proxy `1.0.1`，下载文件均校验 SHA-256。Debian 运行库使用官方仓库安全更新。升级固定软件包时须同步验证版本、校验值及运行兼容性；不要复制实际部署的数据卷到构建目录。
+Go 使用官方 `golang:bookworm` 滚动标签，WARP 使用 Cloudflare 官方 Bookworm 软件源中的最新稳定版；APT 校验仓库签名和软件包哈希，构建日志记录实际 WARP 版本。`go.mod` 的 `go 1.23` 是最低语言要求，不会把构建工具链锁定在该版本。3proxy 仍固定为 `1.0.1` 并校验 SHA-256。`build.sh` 和 CI 每次拉取基础镜像并禁用构建缓存，重新获取 Go、WARP 和 Debian 运行库更新。CI 通过测试后直接发布已测试的镜像，不再重新构建。
+
+新版本在下一次构建时生效，不会自动更新已经运行的容器；升级仍需拉取并重建服务。不要复制实际部署的数据卷到构建目录。
 
 `.dockerignore` 采用允许列表，只发送构建所需源码；`.gitignore` 排除本地配置、数据卷目录、私钥、日志和备份。只以本项目目录作为仓库根目录，示例配置 `config.example.json` 可提交。不要使用 `git add -f` 绕过敏感文件排除。
 
@@ -505,7 +507,7 @@ docker compose exec warp warpdeck status
 
 镜像拉取失败时先停止升级，旧容器可继续运行；不要先删除旧容器或镜像。固定 digest 时按[镜像标签说明](#镜像标签与自动发布)先拉取、核对目标版本，再更新 `.env`，保留其他变量。备份还应包含原 `.env`、Compose 文件和数据卷的实际名称或绑定路径；需要一致的数据备份时安排短暂停机。重建后完成[部署验收](#部署验收)，失败时保留诊断材料并恢复旧镜像；数据格式不兼容时还需恢复匹配的配置备份。
 
-只下载了 Compose 文件的用户也能执行上述升级，不需要 `git pull` 或源码构建。需要更新 Compose 本身时单独审查部署文件变化；不要覆盖自己已有的网络配置。自行构建的用户使用 `sh build.sh --pull` 重建，并保持 `.env` 指向本地镜像。
+只下载了 Compose 文件的用户也能执行上述升级，不需要 `git pull` 或源码构建。需要更新 Compose 本身时单独审查部署文件变化；不要覆盖自己已有的网络配置。自行构建的用户使用 `sh build.sh` 重建，并保持 `.env` 指向本地镜像。
 
 升级保留原数据卷和 Compose 项目名。不要随意改变项目目录名或 `-p` 项目名：Compose 会按项目名寻找数据卷，名称变化可能表现为“身份丢失、重新要求注册”。需要固定名称时，在首次部署就选定 `docker compose -p <项目名> ...` 并持续使用。
 
@@ -569,7 +571,7 @@ WarpDeck 会维护官方客户端的排除表，让自己的路由策略控制�
 ├── entrypoint.sh               # 注册等待、隧道和服务监督、明确应用
 ├── healthcheck.sh              # 容器健康检查
 ├── common.sh                   # 监督脚本共用函数
-├── scripts/fetch-packages.sh   # 固定版本下载和 SHA-256 校验
+├── scripts/fetch-packages.sh   # WARP 签名源下载与 3proxy SHA-256 校验
 ├── tests/
 │   ├── integration.py          # 隔离网络端到端验证
 │   ├── route-pipeline.sh       # pipefail/SIGPIPE 路由检测回归测试

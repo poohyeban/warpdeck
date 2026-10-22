@@ -1,16 +1,16 @@
 # syntax=docker/dockerfile:1
 # All stages use public images. No existing VPS image or registration is needed.
-FROM golang:1.27.2-bookworm AS control
+FROM golang:bookworm AS control
 ENV CGO_ENABLED=0 GOMAXPROCS=2 GOMEMLIMIT=256MiB
 WORKDIR /src
 COPY go.mod ./
 COPY cmd ./cmd
 COPY config.example.json ./
-RUN go test ./... && GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o /out/warpdeck ./cmd/warpdeck
+RUN go version && go test ./... && GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o /out/warpdeck ./cmd/warpdeck
 
 FROM debian:bookworm-slim AS packages
 RUN test "$(dpkg --print-architecture)" = amd64 \
- && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+ && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
  && rm -rf /var/lib/apt/lists/*
 COPY scripts/fetch-packages.sh /fetch-packages.sh
 RUN sh /fetch-packages.sh

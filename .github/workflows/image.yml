@@ -70,8 +70,8 @@ jobs:
           load: true
           tags: warpdeck:ci
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          pull: true
+          no-cache: true
 
       - name: Smoke test without registration or network
         run: |
@@ -103,16 +103,20 @@ jobs:
       - name: Publish tested image
         id: publish
         if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          provenance: mode=min
-
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          while IFS= read -r tag; do
+            test -n "$tag" || continue
+            docker tag warpdeck:ci "$tag"
+            docker push "$tag"
+          done <<< "$TAGS"
+          # Read the digest of the image that passed the smoke tests.
+          digest=$(docker image inspect warpdeck:ci --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+            | awk -F@ -v image="$IMAGE" '$1 == image {print $2; exit}')
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Verify anonymous pull
         if: github.event_name != 'pull_request'
         env:
