@@ -634,11 +634,13 @@ func status(asJSON bool) error {
 			routeState["ipv"+family] = "available"
 		}
 	}
-	result := map[string]any{"name": "WarpDeck", "registration": read(runDir + "/registration-state"), "mode": mode, "requested_mode": requested, "config_path": configPath, "config_in_sync": sync, "config_error": configError, "socks": socks, "ipv4_gateway": gateway, "tunnel": tunnel, "egress": egress, "routes": routeState, "ipv6_gateway": gateway}
+	result := map[string]any{"name": "WarpDeck", "registration": read(runDir + "/registration-state"), "mode": mode, "requested_mode": requested, "config_path": configPath, "config_in_sync": sync, "config_error": configError, "socks": socks, "ipv4_gateway": gateway, "tunnel": tunnel, "egress": egress, "routes": routeState, "ipv6_gateway": gateway, "connectivity": readMonitorStatus()}
 	if asJSON {
 		fmt.Print(string(canonical(result)))
 	} else {
 		fmt.Printf("WarpDeck\nRegistration: %s\nMode: %s\nConfigured mode: %s\nConfiguration: %s (in sync: %t)\nSOCKS5: %s\nIPv4 gateway: %s\nWARP tunnel: %s\nIPv6 gateway: %s\nIPv4 egress: %s (route: %s)\nIPv6 egress: %s (route: %s)\n", read(runDir+"/registration-state"), mode, requested, configPath, sync, socks, gateway, tunnel, gateway, egress.IPv4, routeState["ipv4"], egress.IPv6, routeState["ipv6"])
+		monitor := readMonitorStatus()
+		fmt.Printf("Connectivity: %s (%s)\nDiagnostic logs: %s\n", monitor.State, monitor.Reason, logDirectory())
 		if configError != "" {
 			fmt.Println("Configuration error:", configError)
 		}
@@ -668,6 +670,22 @@ func usage() {
 	fmt.Println("WarpDeck\n  warpdeck register --accept-tos\n  warpdeck status [--json]\n  warpdeck mode proxy|gateway|both  (save only; run reload to apply)\n  warpdeck config show\n  warpdeck config validate [FILE]\n  warpdeck config set FIELD JSON_VALUE  (save only)\n  warpdeck config apply FILE\n  warpdeck reload  (explicitly apply saved configuration)")
 }
 func dispatch(a []string) error {
+	if len(a) == 3 && a[0] == "internal" && a[1] == "connectivity-probe" {
+		var spec probeSpec
+		if e := json.Unmarshal([]byte(a[2]), &spec); e != nil {
+			return e
+		}
+		return json.NewEncoder(os.Stdout).Encode(requestProbe(spec))
+	}
+	if len(a) == 2 && a[0] == "internal" {
+		switch a[1] {
+		case "watchdog":
+			return monitor()
+		case "watchdog-health":
+			return monitorHealth()
+		}
+	}
+
 	if len(a) == 0 || len(a) == 1 && (a[0] == "--help" || a[0] == "help") {
 		usage()
 		return nil

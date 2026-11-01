@@ -5,6 +5,8 @@ source "$RUN_DIR/active/settings.env"
 valid_mode "$MODE"
 [[ "$REVISION" == "$(read_value "$RUN_DIR/applied-revision")" ]]
 alive "$(read_value "$RUN_DIR/supervisor.pid")"
+alive "$(read_value "$RUN_DIR/monitor.pid")"
+warpdeck internal watchdog-health
 if [[ "$EGRESS4" == warp || "$EGRESS6" == warp ]]; then
   warp-cli --accept-tos status | grep 'Status update: Connected' >/dev/null
 fi

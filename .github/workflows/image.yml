@@ -33,8 +33,9 @@ jobs:
         run: |
           bash -n entrypoint.sh common.sh healthcheck.sh
           bash tests/route-pipeline.sh
+          bash tests/recovery-supervisor.sh
           sh -n build.sh scripts/fetch-packages.sh
-          python3 -m py_compile tests/integration.py tests/udp_probe.py
+          python3 -m py_compile tests/integration.py tests/udp_probe.py tests/watchdog-runtime.py
           docker compose config --quiet
 
       - name: Image name

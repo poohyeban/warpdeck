@@ -17,6 +17,7 @@
 - [仅本机与其他容器使用 SOCKS5](#仅本机与其他容器使用-socks5)
 - [部署验收](#部署验收)
 - [运行与构建](#运行与构建)
+- [自动自检与持久化诊断日志](#自动自检与持久化诊断日志)
 - [日常维护与升级](#日常维护与升级)
 - [故障排查](#故障排查)
 - [项目结构](#项目结构)
@@ -34,7 +35,7 @@
 | 持久化 | 注册身份和业务状态分别存入数据卷；重启恢复最后明确应用的配置 |
 | 宿主机接入 | 用户自行决定路由、防火墙及客户端接入；启动容器不会接管整机网络 |
 
-提供 GHCR 镜像，稳定部署建议使用 **`ghcr.io/poohyeban/warpdeck:0.0.2`** 并固定 digest，也可从源码构建。仅支持 **Linux amd64**，没有 ARM64 原生镜像。SOCKS 使用来源 IP 认证，不提供用户名/密码认证；如果多个客户端经过同一个 NAT，容器只能按它实际看到的来源地址区分。**仓库的通用 Compose 仍默认使用 `latest`，将 TCP 40000 发布到宿主机所有地址，默认 JSON 允许全部来源。** 首次启动前必须按所需接入范围调整；仅供本机或容器使用时，按[本机部署步骤](#仅本机与其他容器使用-socks5)限制入口。
+提供 GHCR 镜像，稳定部署建议使用 **`ghcr.io/poohyeban/warpdeck:0.0.3`** 并固定 digest，也可从源码构建。仅支持 **Linux amd64**，没有 ARM64 原生镜像。SOCKS 使用来源 IP 认证，不提供用户名/密码认证；如果多个客户端经过同一个 NAT，容器只能按它实际看到的来源地址区分。**仓库的通用 Compose 仍默认使用 `latest`，将 TCP 40000 发布到宿主机所有地址，默认 JSON 允许全部来源。** 首次启动前必须按所需接入范围调整；仅供本机或容器使用时，按[本机部署步骤](#仅本机与其他容器使用-socks5)限制入口。
 
 ## 给部署 Agent 的操作约定
 
@@ -72,13 +73,13 @@ cd warpdeck
 
 ```sh
 mkdir warpdeck && cd warpdeck
-curl -fL https://raw.githubusercontent.com/poohyeban/warpdeck/v0.0.2/compose.yaml -o compose.yaml
+curl -fL https://raw.githubusercontent.com/poohyeban/warpdeck/v0.0.3/compose.yaml -o compose.yaml
 ```
 
 以上两种方式选一种即可。先按接入范围修改 Compose 的 `ports`（[本机示例](#仅本机与其他容器使用-socks5)），再选择镜像。以下写入命令只用于尚无 `.env` 的新目录；已有文件只修改 `WARPDECK_IMAGE` 一项，保留其他变量：
 
 ```sh
-printf '%s\n' 'WARPDECK_IMAGE=ghcr.io/poohyeban/warpdeck:0.0.2' > .env
+printf '%s\n' 'WARPDECK_IMAGE=ghcr.io/poohyeban/warpdeck:0.0.3' > .env
 ```
 
 检查宿主机环境后拉取、启动：
@@ -119,7 +120,7 @@ curl -g --fail --max-time 20 --socks5-hostname 127.0.0.1:40000 'https://[2606:47
 
 ## 镜像标签与自动发布
 
-当前版本：[v0.0.2](https://github.com/poohyeban/warpdeck/releases/tag/v0.0.2)。构建时跟随最新稳定版 Go 和 WARP，详情见 [更新记录](CHANGELOG.md)。
+当前版本：[v0.0.3](https://github.com/poohyeban/warpdeck/releases/tag/v0.0.3)。新增每分钟真实联网检查、有冷却限制的自动恢复和持久化诊断日志，详情见 [更新记录](CHANGELOG.md)。
 
 镜像地址：[ghcr.io/poohyeban/warpdeck](https://github.com/poohyeban/warpdeck/pkgs/container/warpdeck)。构建记录：[GitHub Actions](https://github.com/poohyeban/warpdeck/actions/workflows/image.yml)。
 
@@ -128,19 +129,19 @@ curl -g --fail --max-time 20 --socks5-hostname 127.0.0.1:40000 'https://[2606:47
 | `ghcr.io/poohyeban/warpdeck:latest` | `main` 分支最近一次成功发布，通用 Compose 的回退默认值，可能先于稳定版本变化 |
 | `ghcr.io/poohyeban/warpdeck:main` | 与主分支发布对应 |
 | `ghcr.io/poohyeban/warpdeck:sha-<完整提交 SHA>` | 按源码提交查找镜像；同一提交重新构建时仍可能更新 |
-| `ghcr.io/poohyeban/warpdeck:0.0.2` | 对应 `v0.0.2` 版本标签，通过发布工作流构建 |
-| `ghcr.io/poohyeban/warpdeck:0.0.2@sha256:<摘要>` | 同时标明版本并固定镜像内容，建议用于稳定部署；摘要以实际拉取结果为准 |
+| `ghcr.io/poohyeban/warpdeck:0.0.3` | 对应 `v0.0.3` 版本标签，通过发布工作流构建 |
+| `ghcr.io/poohyeban/warpdeck:0.0.3@sha256:<摘要>` | 同时标明版本并固定镜像内容，建议用于稳定部署；摘要以实际拉取结果为准 |
 
 通过环境变量选择已有标签或 digest。建议把选择写入本机 `.env`（已被 Git 忽略），之后每次 Compose 操作都会使用同一镜像：
 
 ```sh
 # 先拉取目标版本，再检查其仓库摘要与源码版本
-docker pull ghcr.io/poohyeban/warpdeck:0.0.2
-docker image inspect ghcr.io/poohyeban/warpdeck:0.0.2 \
+docker pull ghcr.io/poohyeban/warpdeck:0.0.3
+docker image inspect ghcr.io/poohyeban/warpdeck:0.0.3 \
   --format 'digests={{json .RepoDigests}} version={{index .Config.Labels "org.opencontainers.image.version"}} revision={{index .Config.Labels "org.opencontainers.image.revision"}}'
 ```
 
-把 `.env` 的 `WARPDECK_IMAGE` 改为 `ghcr.io/poohyeban/warpdeck:0.0.2@sha256:<RepoDigests 中的实际摘要>`，不要把示例占位符原样写入。`RepoDigests` 中仓库引用的摘要用于拉取固定内容，不能用容器 ID、源码 SHA 或随意选取的本地镜像 ID 替代。随后执行 `docker compose config --quiet` 和 `docker compose config --images` 核对解析结果；shell 中同名变量也可能覆盖 `.env`。
+把 `.env` 的 `WARPDECK_IMAGE` 改为 `ghcr.io/poohyeban/warpdeck:0.0.3@sha256:<RepoDigests 中的实际摘要>`，不要把示例占位符原样写入。`RepoDigests` 中仓库引用的摘要用于拉取固定内容，不能用容器 ID、源码 SHA 或随意选取的本地镜像 ID 替代。随后执行 `docker compose config --quiet` 和 `docker compose config --images` 核对解析结果；shell 中同名变量也可能覆盖 `.env`。
 
 `latest` 和 `main` 是移动标签，版本标签也不能替代内容摘要；获取镜像的新版本需要手动 `pull` 并重建容器，运行中的容器不会自动更新。仅发布 `linux/amd64`；Apple Silicon 或 ARM VPS 不属于原生支持平台。
 
@@ -398,7 +399,7 @@ curl -g --fail --max-time 10 --socks5-hostname warp:1080 'https://[2606:4700:470
 
 ## 部署验收
 
-先等首次注册和连接完成，确认 `docker compose ps` 为 healthy、`warpdeck status --json` 的模式和出口符合预期、`config_in_sync=true`。`proxy` 下两个 gateway 状态应为 `disabled`。健康检查和 `reload` 都不是公网连通性证明。
+先等首次注册和连接完成，确认 `docker compose ps` 为 healthy、`warpdeck status --json` 的模式和出口符合预期、`config_in_sync=true`。`proxy` 下两个 gateway 状态应为 `disabled`。启动/应用配置后有 60 秒自检宽限期；首次真实探测成功后 `status --json` 的 `connectivity.state` 应为 `healthy`。健康状态仅代表已覆盖的探测路径，`reload` 本身不做公网验收。
 
 下方在 **Bash** 中执行，适用于宿主机本地 TCP 入口、双栈 WARP 的 `proxy` / `both` 部署。根据实际部署修改 `proxy_address`；选择 `native` 的地址族应单独验证其预期出口，不套用 `warp=on` 断言。`gateway` 模式需从已接入的网关客户端发请求，不使用 SOCKS 示例。
 
@@ -435,9 +436,9 @@ printf 'passed=%s rounds elapsed=%ss\n' "$rounds" "$((SECONDS-started))"
 
 ## 运行与构建
 
-仅一个官方 `warp-svc`，三种模式均使用 `tunnel_only`；需要 SOCKS 时运行一个低权限 3proxy 进程。Bash 监督进程接收明确的应用请求并监督进程、维护隧道路由，不扫描 JSON 文件。Go 编写的 `warpdeck` 仅在命令、配置检查和健康检查时短暂执行，不是常驻服务；编译器不进入镜像。
+仅一个官方 `warp-svc`，三种模式均使用 `tunnel_only`；需要 SOCKS 时运行一个低权限 3proxy 进程。Bash 监督进程接收明确的应用请求并监督进程、维护隧道路由，不扫描 JSON 文件。Go 编写的 `warpdeck` 提供 CLI 和一个常驻的轻量联网监控进程；编译器不进入镜像。监控只提交恢复请求，由 Bash 监督进程与配置应用串行执行。
 
-关键进程退出会导致容器退出，由 `restart: unless-stopped` 恢复；健康检查本身不自动重启 unhealthy 容器。日志与资源限制由 Compose 设置。
+WARP、DBus 或代理进程退出会导致容器退出，由 `restart: unless-stopped` 恢复。监控进程异常退出会使健康检查失败，不通过反复重启正常隧道掩盖监控故障。Docker 健康状态本身不自动重启 unhealthy 容器。
 
 Dockerfile 使用公开的 `debian:bookworm-slim` 和官方 Go 构建镜像。独立构建阶段编译控制程序并运行单元测试；另一个阶段从 Cloudflare 签名软件源下载最新稳定版 WARP，并下载校验固定版本的 3proxy 软件包，只提取命令行运行文件和版权资料。运行镜像不包含编译器、WARP GUI 或 WebKit，不执行下载包的维护脚本。
 
@@ -459,6 +460,54 @@ Go 使用官方 `golang:bookworm` 滚动标签，WARP 使用 Cloudflare 官方 B
 `.dockerignore` 采用允许列表，只发送构建所需源码；`.gitignore` 排除本地配置、数据卷目录、私钥、日志和备份。只以本项目目录作为仓库根目录，示例配置 `config.example.json` 可提交。不要使用 `git add -f` 绕过敏感文件排除。
 
 依赖来源：[Cloudflare 官方软件包](https://pkg.cloudflareclient.com/)、[3proxy 1.0.1](https://github.com/3proxy/3proxy/releases/tag/1.0.1)、[Debian](https://www.debian.org/)、[Go 官方镜像](https://hub.docker.com/_/golang)。
+
+## 自动自检与持久化诊断日志
+
+从 0.0.3 起自动启用，不修改已有业务 JSON。正常情况下每 **60 秒**检查一次。启动或应用新配置后给予 60 秒宽限；探测不重叠，耗时的诊断或恢复超过周期时跳过补跑，避免并发请求堆积。
+
+- 只对配置为 `warp` 的地址族实施自动恢复，IPv4/IPv6 分别计数。优先通过实际 SOCKS 完成 CONNECT、TLS 校验和 HTTPS 响应验证；主目标为 Cloudflare trace，失败时再访问 Google DNS HTTPS 备用目标。目标 IP 明确指定，不把 DNS 故障误算成隧道故障。
+- SOCKS 双目标均失败时，以代理相同 UID、相同策略路由直接复测。直接出站成功说明代理层异常，只恢复代理；两条路径都失败才考虑 WARP。两个地址族均使用 WARP 时，还会补做域名经 SOCKS 解析的检查；仅域名失败会报告 `dns_degraded`，不触发隧道重连。
+- **同一地址族连续失败 3 次**才考虑恢复。先用容器原生出口检查底层网络；原生 IPv4/IPv6 控制探测均失败时报告 `underlay_down`，保持每分钟探测，等待网络恢复。此判断是控制目标的可达性证据，不是对 VPS 运营商故障的最终归因。
+- **所有自动恢复动作至少间隔 10 分钟**，包括代理重启和 WARP 重连。上次动作时间持久化，重启、配置 reload、短暂成功都不能绕过冷却。冷却中继续探测并报告 `cooldown`；恢复成功后仍保留最近动作时间。
+- 重连不重新注册、不删除身份、不改业务 JSON、不切到原生业务出口。恢复与 reload 串行执行，并校验已应用配置 revision，防止过期探测恢复错误配置。`connect` 命令成功只表示提交成功，实际恢复由下一轮真实请求确认。
+
+监控遵守 SOCKS 来源白名单，不暗中加入来源。如果白名单不允许容器自身的地址，记录 `socks_covered=false`，改用同 UID 的策略路由检查；网关模式也使用此检查。它不能证明外部客户端到网关的转发链路或 UDP 正常。正常双 WARP SOCKS 部署每轮约 3 个小 HTTPS 请求；每个请求最多 8 秒、响应最多 16 KiB，不跑测速，不记录用户访问流量。
+
+通用 Compose 将宿主机 `./logs` 挂载到 `/var/log/warpdeck`，由 **WarpDeck 自己**管理。已有部署升级时保留原 Compose、端口和两个数据卷，只追加：
+
+```yaml
+services:
+  warp:
+    environment:
+      WARPDECK_LOG_DIR: /var/log/warpdeck
+    volumes:
+      - ./logs:/var/log/warpdeck
+```
+
+这是需要合并到现有服务的片段，不可覆盖原 `environment` 或 `volumes`。先在 Compose 所在目录执行 `mkdir -p logs && chmod 700 logs`。未配置 `WARPDECK_LOG_DIR` 时回退到 `/var/lib/warpdeck/logs`，随业务状态卷持久化。
+
+| 文件 | 内容 | 自动保留上限 |
+| --- | --- | --- |
+| `checks.jsonl` | 每轮开始/结束时间、地址族、路径、目标、失败阶段、HTTP 状态、耗时、连续失败计数、监控状态 | 每份 5 MiB，共 6 份，含当前文件，约 30 MiB |
+| `events.jsonl` | 故障编号、配置 revision、原生网络判定、恢复请求及退出码、冷却时间、状态变化与恢复确认 | 每份 5 MiB，共 4 份，含当前文件，约 20 MiB |
+| `incidents/<故障编号>/` | 首次故障、最近 3 次恢复的前后快照，以及恢复成功现场 | 每份最多 256 KiB，每个故障最多 8 份；最多 20 个故障、历史保留 30 天，约 40 MiB |
+| `recovery-state.json` | 上次自动恢复时间、当前故障与计数 | 小型状态文件，原子替换 |
+
+故障现场包含有限的路由/规则、接口收发统计、WARP 状态、隧道统计、官方连接统计的白名单字段及脱敏网络告警。首次现场不会被后续重连覆盖；保留中的同次故障最多留最近 3 次动作前后现场，完整动作时间线另记在事件日志中。持续未恢复的当前故障不按 30 天删除，文件数量仍有上限。总保留量约 **90 MiB**，另有少量状态和单次写入空间。按重命名方式轮转，不使用 `copytruncate`，不依赖宿主机 logrotate。
+
+文件权限为 0600、故障目录为 0700。不会采集注册文件、密钥、令牌、进程参数、环境变量或客户访问日志。重连前必须成功写入诊断并持久化冷却时间；磁盘满或权限错误时报告日志错误并抑制自动恢复，避免自动动作擦掉故障证据。诊断命令也有时间与输出上限。
+
+官方 WARP 自身日志仍留在原身份卷 `/var/lib/cloudflare-warp`，由官方客户端轮转；它们和 Docker stdout 日志不计入上述 90 MiB。项目只摘取有限诊断字段，不接管官方日志文件，不将其原样复制到公开日志。
+
+```sh
+docker compose exec -T warp warpdeck status --json
+# 宿主机 Compose 目录下：
+tail -n 5 logs/checks.jsonl
+tail -n 20 logs/events.jsonl
+ls -l logs/incidents/
+```
+
+`connectivity` 会显示 `starting`、`healthy`、`suspect`、`recovering`、`cooldown`、`underlay_down`、`dns_degraded` 等状态、最近结果及下一次允许恢复的时间。监控失联、诊断写入失败或确认联网故障时 Docker 健康检查失败。单个目标异常会使用备用目标，不因一次超时立即重连。
 
 ## 日常维护与升级
 
@@ -553,7 +602,7 @@ docker compose logs --tail 80 warp
 
 WarpDeck 会维护官方客户端的排除表，让自己的路由策略控制流量。官方排除表出现 `0.0.0.0/0` 与 `::/0` 不代表业务流量绕过 WARP；实际出口由 JSON、`warpdeck status` 和真实请求确认。不要手动修改这些内部排除项。
 
-`warp-cli` 用于查看官方客户端状态；业务模式、白名单和解析策略统一用 `warpdeck` 管理，避免手工修改官方客户端模式导致运行状态与监督进程预期不一致。健康检查验证本地服务和隧道，不保证任意外部网站可达。
+`warp-cli` 用于查看官方客户端状态；业务模式、白名单和解析策略统一用 `warpdeck` 管理，避免手工修改官方客户端模式导致运行状态与监督进程预期不一致。健康检查验证本地服务、隧道和最近的联网探测结果；探测目标通过不代表任意外部网站或 UDP 都可达。
 
 ## 项目结构
 
@@ -592,6 +641,8 @@ docker pull ghcr.io/poohyeban/warpdeck:latest
 sudo python3 tests/integration.py --image ghcr.io/poohyeban/warpdeck:latest --accept-tos
 ```
 
-测试要求宿主机有可用的原生 IPv4 和 IPv6。脚本在独立容器命名空间中分别模拟双栈、IPv4-only、IPv6-only 的隧道承载网络，覆盖四种出站组合、双栈 SOCKS/网关 TCP/UDP、全部来源和拒绝来源、三模式、手动 reload、失败配置、重启身份保持及断线重连。某个原生地址族不可用时，测试预期对应 `native` 请求失败而配置仍成功应用。这里的场景判断仅属于测试工具，不存在于运行容器中。
+另有无需 WARP 注册的监控集成测试：`python3 tests/watchdog-runtime.py --image <候选镜像>`。它在一次性容器内模拟隧道不可达，验证三次确认、监督进程恢复、诊断持久化、重启保留冷却和原生网络失效抑制；需要 Docker 和原生 IPv4 HTTPS，约 8 分钟，不使用生产数据卷。它不验证 Cloudflare 的实际恢复行为。
+
+下面的真实端到端测试要求宿主机有可用的原生 IPv4 和 IPv6。脚本在独立容器命名空间中分别模拟双栈、IPv4-only、IPv6-only 的隧道承载网络，覆盖四种出站组合、双栈 SOCKS/网关 TCP/UDP、全部来源和拒绝来源、三模式、手动 reload、失败配置、重启身份保持及断线重连。某个原生地址族不可用时，测试预期对应 `native` 请求失败而配置仍成功应用。这里的场景判断仅属于测试工具，不存在于运行容器中。
 
 测试创建专用临时容器、网络、数据卷和独立 WARP 身份，结束后删除自己的资源；不修改宿主机默认路由或已有容器。临时网段为 `172.28.82.0/24` 和 `fd80:82::/64`，先确认无冲突。可用 `--scenario dual`、`--scenario ipv4` 或 `--scenario ipv6` 单独执行一个场景；默认 `all`。在独立测试环境运行，不复用生产注册身份或数据卷。

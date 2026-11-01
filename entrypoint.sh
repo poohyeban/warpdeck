@@ -20,20 +20,20 @@ rm -rf "$RUN_DIR/active"
 exec 9<>"$RUN_DIR/events"
 atomic_write "$RUN_DIR/supervisor.pid" "$BASHPID"
 atomic_write "$RUN_DIR/registration-state" "starting"
-proxy_pid= dbus_pid= warp_pid= applied= active_iface= active_proxy_revision= active_egress_revision=
+proxy_pid= dbus_pid= warp_pid= monitor_pid= applied= active_iface= active_proxy_revision= active_egress_revision=
 cleanup() {
   trap - EXIT TERM INT
   rm -f "$RUN_DIR/applied-mode" "$RUN_DIR/applied-revision" "$RUN_DIR/supervisor.pid" "$STATE_DIR/applied-mode"
-  for pid in "$proxy_pid" "$warp_pid" "$dbus_pid"; do
+  for pid in "$monitor_pid" "$proxy_pid" "$warp_pid" "$dbus_pid"; do
     [[ -z "$pid" ]] || kill "$pid" 2>/dev/null || true
   done
   for ((i=0; i<20; i++)); do
     remaining=false
-    for pid in "$proxy_pid" "$warp_pid" "$dbus_pid"; do alive "$pid" && remaining=true || true; done
+    for pid in "$monitor_pid" "$proxy_pid" "$warp_pid" "$dbus_pid"; do alive "$pid" && remaining=true || true; done
     [[ "$remaining" == true ]] || break
     sleep 0.1
   done
-  for pid in "$proxy_pid" "$warp_pid" "$dbus_pid"; do
+  for pid in "$monitor_pid" "$proxy_pid" "$warp_pid" "$dbus_pid"; do
     [[ -z "$pid" ]] || kill -KILL "$pid" 2>/dev/null || true
   done
   wait || true
@@ -221,6 +221,32 @@ reconcile() {
     atomic_write "$RUN_DIR/failed-revision" "$requested_revision"
   fi
 }
+# Recovery shares this single supervisor with reload. The monitor never edits
+# policy, registers an identity, applies pending JSON, or changes host networking.
+recover_service() {
+  local kind=$1 incident=$2 revision=$3 rc1=0 rc2=0
+  [[ "$incident" =~ ^[0-9TZ-]+$ && "$revision" =~ ^[0-9a-f]{64}$ ]] || return 0
+  if [[ "$revision" != "$(read_value "$RUN_DIR/applied-revision")" ]]; then
+    atomic_write "$RUN_DIR/recovery-result" "$incident $kind skipped 0 0"
+    return 0
+  fi
+  case "$kind" in
+    tunnel)
+      warp_command disconnect >"$RUN_DIR/recovery-command-output" 2>&1 || rc1=$?
+      sleep 1
+      warp_command connect >>"$RUN_DIR/recovery-command-output" 2>&1 || rc2=$?
+      ensure_routes
+      ;;
+    proxy)
+      stop_proxy
+      start_proxy "$RUN_DIR/active/config.json" >"$RUN_DIR/recovery-command-output" 2>&1 || rc2=$?
+      ;;
+    *) return 0;;
+  esac
+  local outcome=success
+  [[ "$rc1" == 0 && "$rc2" == 0 ]] || outcome=failed
+  atomic_write "$RUN_DIR/recovery-result" "$incident $kind $outcome $rc1 $rc2"
+}
 dbus-daemon --system --nofork --nopidfile 9>&- &
 dbus_pid=$!
 # Official daemon output can contain account details. Keep routine Docker logs
@@ -244,13 +270,22 @@ if [[ "$(read_value "$RUN_DIR/registration-state")" == registered || ( "$EGRESS4
 else
   echo 'WarpDeck: registration required. Run: docker compose exec warp warpdeck register --accept-tos'
 fi
+warpdeck internal watchdog 8>&- 9>&- &
+monitor_pid=$!
+atomic_write "$RUN_DIR/monitor.pid" "$monitor_pid"
 while :; do
   alive "$dbus_pid" && alive "$warp_pid" || exit 1
   [[ -z "$proxy_pid" ]] || alive "$proxy_pid" || exit 1
   [[ -z "$applied" ]] || ensure_routes
+  # Expose a crashed monitor as unhealthy without restarting a working tunnel
+  # or resetting its persistent recovery budget.
   if IFS= read -r -t 5 request <&9; then
     case "$request" in
       reload) reconcile;;
+      recover\ *)
+        read -r _ kind incident revision extra <<< "$request"
+        [[ -n "$extra" ]] || recover_service "$kind" "$incident" "$revision"
+        ;;
       registered)
         if warp-cli --accept-tos registration show >/dev/null 2>&1; then
           atomic_write "$RUN_DIR/registration-state" "registered"

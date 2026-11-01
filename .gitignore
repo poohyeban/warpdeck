@@ -36,6 +36,7 @@ compose.local.*
 /secrets/
 /backups/
 /evidence/
+/logs/
 reg.json
 registration.json
 settings.json

@@ -18,11 +18,13 @@ services:
     environment:
       MALLOC_ARENA_MAX: "2"
       MALLOC_TRIM_THRESHOLD_: "131072"
+      WARPDECK_LOG_DIR: /var/log/warpdeck
     ports:
       - "40000:1080/tcp"
     volumes:
       - warp-data:/var/lib/cloudflare-warp
       - warpdeck-state:/var/lib/warpdeck
+      - ./logs:/var/log/warpdeck
     sysctls:
       net.ipv4.ip_forward: "1"
       net.ipv6.conf.all.disable_ipv6: "0"

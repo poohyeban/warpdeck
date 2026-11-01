@@ -1,5 +1,19 @@
 # 更新记录
 
+## [0.0.3] - 2026-11-01
+
+### 新增
+
+- 每 60 秒通过实际 SOCKS/策略路由验证 WARP IPv4/IPv6；完整检查 CONNECT、TLS 与响应，失败时使用独立备用目标。
+- 同一地址族连续失败 3 次后才恢复；区分 SOCKS、DNS、WARP 与原生网络不可达，自动恢复至少间隔 10 分钟，冷却时间持久化。
+- 挂载目录中的自维护 JSONL 日志和故障快照，保留重连前后证据，按大小、份数和故障历史期限有界轮转；诊断输出限时限量并脱敏。
+- `status --json` 与 Docker healthcheck 展示真实联网检测状态；恢复不修改业务配置或注册身份。
+
+### 验证
+
+- 新增 SOCKS/TLS、冷却持久化、地址族计数、日志轮转、脱敏及监督进程恢复测试；提供无需注册的隔离监控集成测试。
+
+
 ## [0.0.2] - 2026-10-22
 
 ### 更新
@@ -30,3 +44,5 @@
 
 [0.0.2]: https://github.com/poohyeban/warpdeck/releases/tag/v0.0.2
 [0.0.1]: https://github.com/poohyeban/warpdeck/releases/tag/v0.0.1
+
+[0.0.3]: https://github.com/poohyeban/warpdeck/releases/tag/v0.0.3
